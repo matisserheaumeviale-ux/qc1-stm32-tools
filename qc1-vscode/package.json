@@ -1,0 +1,55 @@
+{
+  "name": "QC1-STM32-Tools",
+  "displayName": "QC1 STM32F103 Tools",
+  "description": "Interface VSCode pour Quick Command STM32",
+  "version": "0.0.2",
+  "publisher": "Mistral400",
+  "repository": {
+  "type": "git",
+  "url": "https://github.com/matisserheaumeviale-ux/Projet-de-fin-de-session-2026"
+},
+  "engines": {
+    "vscode": "^1.118.0"
+  },
+  "activationEvents": [
+    "onView:qc1.panel"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "qc1",
+          "title": "QC1",
+          "icon": "media/qc1.svg"
+        }
+      ]
+    },
+    "views": {
+      "qc1": [
+        {
+          "id": "qc1.panel",
+          "name": "STM32 Control",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      { "command": "qc1.build", "title": "QC1: Build" },
+      { "command": "qc1.tsmake", "title": "QC1: Test Build" },
+      { "command": "qc1.flash", "title": "QC1: Flash" },
+      { "command": "qc1.health", "title": "QC1: Health Check" },
+      { "command": "qc1.status", "title": "QC1: Status" },
+      { "command": "qc1.error", "title": "QC1: Errors" },
+      { "command": "qc1.dev", "title": "QC1: Dev Mode" }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.118.0",
+    "typescript": "^5.0.0"
+  }
+}
