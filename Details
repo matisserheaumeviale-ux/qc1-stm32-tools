@@ -1,0 +1,26 @@
+# QC1 STM32 Tools
+
+Extension VSCode pour piloter un projet STM32 via **Quick Command (qc1)**.
+
+## Features
+- Build (make)
+- Test build (tsmake)
+- Flash
+- Health / Status
+- Terminal intégré QC1
+
+## Requirements
+Le projet doit contenir :
+scripts/quick-command
+
+## Usage
+Ouvre la sidebar **QC1** puis utilise les boutons.
+
+## Commands
+- QC1: Build
+- QC1: Test Build
+- QC1: Flash
+- QC1: Health Check
+- QC1: Status
+- QC1: Errors
+- QC1: Dev Mode
