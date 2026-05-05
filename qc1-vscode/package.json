@@ -1,8 +1,8 @@
 {
-  "name": "QC1-STM32-Tools",
+  "name": "qc1-stm32-tools",
   "displayName": "QC1 STM32F103 Tools",
   "description": "Interface VSCode pour Quick Command STM32",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "publisher": "Mistral400",
   "icon": "media/icon.png",
   "repository": {
@@ -31,8 +31,7 @@
         {
           "id": "qc1.panel",
           "name": "STM32 Control",
-          "type": "webview",
-          "icon": "media/icon.png"
+          "type": "webview"
         }
       ]
     },
@@ -72,35 +71,56 @@
         "qc1.quickCommandPath": {
           "type": "string",
           "default": "./scripts/quick-command",
-          "description": "Path to the quick-command script."
+          "description": "Path to quick-command script"
         },
         "qc1.autoClearOutput": {
           "type": "boolean",
           "default": false,
-          "description": "Automatically clear output before running a command."
+          "description": "Clear output before running"
+        },
+        "qc1.showTimestamps": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show timestamps in output"
+        },
+        "qc1.outputMaxLines": {
+          "type": "number",
+          "default": 500,
+          "minimum": 50,
+          "maximum": 5000,
+          "description": "Max output lines"
+        },
+        "qc1.compactMode": {
+          "type": "boolean",
+          "default": false,
+          "description": "Compact UI mode"
         },
         "qc1.autoRefreshStatus": {
           "type": "boolean",
           "default": true,
-          "description": "Automatically refresh QC1 status."
+          "description": "Auto refresh status"
         },
         "qc1.enablePointerVisualizer": {
           "type": "boolean",
           "default": true,
-          "description": "Enable the C pointer visualizer."
+          "description": "Enable pointer visualizer"
         },
         "qc1.pointerVisualizerMaxDepth": {
           "type": "number",
           "default": 3,
           "minimum": 1,
           "maximum": 10,
-          "description": "Maximum pointer indirection depth to visualize."
+          "description": "Pointer depth"
         },
         "qc1.visualizerTheme": {
           "type": "string",
-          "enum": ["auto", "dark", "light"],
+          "enum": [
+            "auto",
+            "dark",
+            "light"
+          ],
           "default": "auto",
-          "description": "Theme for the pointer visualizer."
+          "description": "Visualizer theme"
         }
       }
     }
