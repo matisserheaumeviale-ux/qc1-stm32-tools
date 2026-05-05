@@ -4,6 +4,7 @@
   "description": "Interface VSCode pour Quick Command STM32",
   "version": "0.0.2",
   "publisher": "Mistral400",
+  "icon": "media/icon.png",
   "repository": {
   "type": "git",
   "url": "https://github.com/matisserheaumeviale-ux/Projet-de-fin-de-session-2026"
