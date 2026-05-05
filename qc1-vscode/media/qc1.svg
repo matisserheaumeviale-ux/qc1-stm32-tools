@@ -1,3 +1,5 @@
-<svg width="128" height="128" viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg">
-  <path fill="#FFFFFF" d="M34 16h60c9.941 0 18 8.059 18 18v60c0 9.941-8.059 18-18 18H34c-9.941 0-18-8.059-18-18V34c0-9.941 8.059-18 18-18zm4 28v40h52V44H38zm10 10h32v6H48v-6zm0 14h20v6H48v-6z"/>
+<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+  <path fill="white" d="M6 4h12v2H6z"/>
+  <path fill="white" d="M4 7h16v10H4zM7 10v4h2v-4zm4 0v4h2v-4zm4 0v4h2v-4z"/>
+  <path fill="white" d="M6 18h12v2H6z"/>
 </svg>
