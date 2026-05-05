@@ -2,7 +2,7 @@
   "name": "QC1-STM32-Tools",
   "displayName": "QC1 STM32F103 Tools",
   "description": "Interface VSCode pour Quick Command STM32",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "publisher": "Mistral400",
   "icon": "media/icon.png",
   "repository": {
@@ -65,7 +65,45 @@
         "command": "qc1.dev",
         "title": "QC1: Dev Mode"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "QC1 STM32 Tools",
+      "properties": {
+        "qc1.quickCommandPath": {
+          "type": "string",
+          "default": "./scripts/quick-command",
+          "description": "Path to the quick-command script."
+        },
+        "qc1.autoClearOutput": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically clear output before running a command."
+        },
+        "qc1.autoRefreshStatus": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically refresh QC1 status."
+        },
+        "qc1.enablePointerVisualizer": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable the C pointer visualizer."
+        },
+        "qc1.pointerVisualizerMaxDepth": {
+          "type": "number",
+          "default": 3,
+          "minimum": 1,
+          "maximum": 10,
+          "description": "Maximum pointer indirection depth to visualize."
+        },
+        "qc1.visualizerTheme": {
+          "type": "string",
+          "enum": ["auto", "dark", "light"],
+          "default": "auto",
+          "description": "Theme for the pointer visualizer."
+        }
+      }
+    }
   },
   "scripts": {
     "compile": "tsc"
