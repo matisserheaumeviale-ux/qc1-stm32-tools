@@ -6,7 +6,10 @@ class QC1PanelProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = "qc1.panel";
   private view?: vscode.WebviewView;
 
-  constructor(private readonly extensionUri: vscode.Uri) {}
+  constructor(
+    private readonly extensionUri: vscode.Uri,
+    private readonly extensionVersion: string
+  ) {}
 
   resolveWebviewView(webviewView: vscode.WebviewView): void {
     this.view = webviewView;
@@ -149,6 +152,7 @@ class QC1PanelProvider implements vscode.WebviewViewProvider {
 </head>
 <body>
   <h2>QC1 STM32</h2>
+  <div style="margin-bottom: 10px; opacity: 0.8;">Version ${this.extensionVersion}</div>
 
   <div class="buttons">
     <button onclick="run('health')">Health</button>
@@ -209,7 +213,10 @@ class QC1PanelProvider implements vscode.WebviewViewProvider {
 }
 
 export function activate(context: vscode.ExtensionContext) {
-  const provider = new QC1PanelProvider(context.extensionUri);
+  const provider = new QC1PanelProvider(
+    context.extensionUri,
+    context.extension.packageJSON.version ?? "unknown"
+  );
 
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(QC1PanelProvider.viewType, provider)

@@ -6,8 +6,9 @@ const vscode = require("vscode");
 const child_process_1 = require("child_process");
 const path = require("path");
 class QC1PanelProvider {
-    constructor(extensionUri) {
+    constructor(extensionUri, extensionVersion) {
         this.extensionUri = extensionUri;
+        this.extensionVersion = extensionVersion;
     }
     resolveWebviewView(webviewView) {
         this.view = webviewView;
@@ -139,6 +140,7 @@ class QC1PanelProvider {
 </head>
 <body>
   <h2>QC1 STM32</h2>
+  <div style="margin-bottom: 10px; opacity: 0.8;">Version ${this.extensionVersion}</div>
 
   <div class="buttons">
     <button onclick="run('health')">Health</button>
@@ -199,7 +201,7 @@ class QC1PanelProvider {
 }
 QC1PanelProvider.viewType = "qc1.panel";
 function activate(context) {
-    const provider = new QC1PanelProvider(context.extensionUri);
+    const provider = new QC1PanelProvider(context.extensionUri, context.extension.packageJSON.version ?? "unknown");
     context.subscriptions.push(vscode.window.registerWebviewViewProvider(QC1PanelProvider.viewType, provider));
     const runInTerminal = (cmd) => {
         const terminal = vscode.window.createTerminal("QC1");

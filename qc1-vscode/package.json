@@ -7,7 +7,7 @@
   "icon": "media/icon.png",
   "repository": {
     "type": "git",
-    "url": "https://github.com/matisserheaumeviale-ux/Projet-de-fin-de-session-2026"
+    "url": "https://github.com/matisserheaumeviale-ux/qc1-stm32-tools.git"
   },
   "engines": {
     "vscode": "^1.118.0"
