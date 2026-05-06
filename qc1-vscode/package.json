@@ -2,18 +2,33 @@
   "name": "qc1-stm32-tools",
   "displayName": "QC1 STM32F103 Tools",
   "description": "Interface VSCode pour Quick Command STM32",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "publisher": "Mistral400",
   "icon": "media/icon.png",
   "repository": {
     "type": "git",
     "url": "https://github.com/matisserheaumeviale-ux/qc1-stm32-tools.git"
   },
+  "files": [
+    "out",
+    "media",
+    "resources",
+    "package.json",
+    "README.md"
+  ],
   "engines": {
     "vscode": "^1.118.0"
   },
   "activationEvents": [
-    "onView:qc1.panel"
+    "onView:qc1.panel",
+    "workspaceContains:Makefile",
+    "workspaceContains:**/*.ioc",
+    "workspaceContains:**/*.eww",
+    "workspaceContains:**/*.ewp",
+    "onCommand:qc1.build",
+    "onCommand:qc1.flash",
+    "onCommand:qc1.run",
+    "onCommand:qc1.status"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -21,8 +36,8 @@
       "activitybar": [
         {
           "id": "qc1",
-          "title": "QC1",
-          "icon": "media/qc1.svg"
+          "title": "QC1 STM32",
+          "icon": "media/icon.svg"
         }
       ]
     },
@@ -30,7 +45,7 @@
       "qc1": [
         {
           "id": "qc1.panel",
-          "name": "STM32 Control",
+          "name": "STM32 Tools",
           "type": "webview"
         }
       ]
@@ -38,7 +53,21 @@
     "commands": [
       {
         "command": "qc1.build",
-        "title": "QC1: Build"
+        "title": "Build Project",
+        "category": "QC1 STM32",
+        "icon": "$(tools)"
+      },
+      {
+        "command": "qc1.clean",
+        "title": "Clean Project",
+        "category": "QC1 STM32",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "qc1.rebuild",
+        "title": "Rebuild Project",
+        "category": "QC1 STM32",
+        "icon": "$(sync)"
       },
       {
         "command": "qc1.tsmake",
@@ -46,7 +75,15 @@
       },
       {
         "command": "qc1.flash",
-        "title": "QC1: Flash"
+        "title": "Flash STM32",
+        "category": "QC1 STM32",
+        "icon": "$(debug-start)"
+      },
+      {
+        "command": "qc1.run",
+        "title": "Build + Flash + Status",
+        "category": "QC1 STM32",
+        "icon": "$(play)"
       },
       {
         "command": "qc1.health",
@@ -54,24 +91,134 @@
       },
       {
         "command": "qc1.status",
-        "title": "QC1: Status"
+        "title": "Show STM32 Status",
+        "category": "QC1 STM32",
+        "icon": "$(pulse)"
       },
       {
         "command": "qc1.error",
         "title": "QC1: Errors"
       },
       {
+        "command": "qc1.detectStlink",
+        "title": "Detect ST-Link",
+        "category": "QC1 STM32",
+        "icon": "$(search)"
+      },
+      {
+        "command": "qc1.openSerial",
+        "title": "Open Serial Monitor",
+        "category": "QC1 STM32",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "qc1.startOpenOcd",
+        "title": "Start OpenOCD",
+        "category": "QC1 STM32",
+        "icon": "$(radio-tower)"
+      },
+      {
+        "command": "qc1.configure",
+        "title": "Configure QC1 STM32 Tools",
+        "category": "QC1 STM32",
+        "icon": "$(settings-gear)"
+      },
+      {
+        "command": "qc1.refresh",
+        "title": "Refresh QC1 Panel",
+        "category": "QC1 STM32",
+        "icon": "$(refresh)"
+      },
+      {
         "command": "qc1.dev",
         "title": "QC1: Dev Mode"
       }
     ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "qc1.build"
+        },
+        {
+          "command": "qc1.clean"
+        },
+        {
+          "command": "qc1.rebuild"
+        },
+        {
+          "command": "qc1.flash"
+        },
+        {
+          "command": "qc1.run"
+        },
+        {
+          "command": "qc1.status"
+        },
+        {
+          "command": "qc1.detectStlink"
+        },
+        {
+          "command": "qc1.openSerial"
+        },
+        {
+          "command": "qc1.startOpenOcd"
+        },
+        {
+          "command": "qc1.configure"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "qc1.refresh",
+          "when": "view == qc1.panel",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "qc1.build",
+          "when": "view == qc1.panel",
+          "group": "inline"
+        },
+        {
+          "command": "qc1.flash",
+          "when": "view == qc1.panel",
+          "group": "inline"
+        }
+      ]
+    },
     "configuration": {
       "title": "QC1 STM32 Tools",
       "properties": {
         "qc1.quickCommandPath": {
           "type": "string",
-          "default": "./scripts/quick-command",
-          "description": "Path to quick-command script"
+          "default": "",
+          "description": "Optional custom path to quick-command. If empty, QC1 uses its built-in portable script."
+        },
+        "qc1.serialPort": {
+          "type": "string",
+          "default": "",
+          "description": "Serial port used for STM32 UART"
+        },
+        "qc1.baudRate": {
+          "type": "number",
+          "default": 19200,
+          "description": "UART baud rate"
+        },
+        "qc1.openocdPath": {
+          "type": "string",
+          "default": "openocd",
+          "description": "Path to OpenOCD executable"
+        },
+        "qc1.stlinkPath": {
+          "type": "string",
+          "default": "st-info",
+          "description": "Path to ST-Link command line tool"
+        },
+        "qc1.autoDetectProject": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically detect STM32 project files"
         },
         "qc1.autoClearOutput": {
           "type": "boolean",

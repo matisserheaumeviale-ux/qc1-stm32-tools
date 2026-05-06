@@ -1,0 +1,31 @@
+#!/bin/bash
+
+CMD="$1"
+
+case "$CMD" in
+  make|build)
+    make
+    ;;
+  clean)
+    make clean
+    ;;
+  flash)
+    make flash
+    ;;
+  run)
+    make
+    make flash
+    ;;
+  status)
+    echo "QC1 Status"
+    echo "Workspace: $(pwd)"
+    echo "Makefile:"
+    test -f Makefile && echo "OK" || echo "Missing"
+    echo "ST-Link:"
+    command -v st-info >/dev/null && st-info --probe || echo "st-info not found"
+    ;;
+  *)
+    echo "QC1 Quick Command"
+    echo "Usage: quick-command [make|build|clean|flash|run|status]"
+    ;;
+esac

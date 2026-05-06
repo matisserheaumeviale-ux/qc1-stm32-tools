@@ -1,13 +1,78 @@
 import * as vscode from "vscode";
 import { exec } from "child_process";
+import * as fs from "fs";
+import * as os from "os";
 import * as path from "path";
+
+function fileExists(filePath: string): boolean {
+  try {
+    return fs.existsSync(filePath);
+  } catch {
+    return false;
+  }
+}
+
+function getWorkspaceRoot(): string | undefined {
+  return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+}
+
+function getQuickCommandPath(context: vscode.ExtensionContext): string {
+  const config = vscode.workspace.getConfiguration("qc1");
+  const customPath = config.get<string>("quickCommandPath", "").trim();
+
+  if (customPath && fileExists(customPath)) {
+    return customPath;
+  }
+
+  const root = getWorkspaceRoot();
+
+  if (root) {
+    const workspaceScript =
+      os.platform() === "win32"
+        ? path.join(root, "scripts", "quick-command.ps1")
+        : path.join(root, "scripts", "quick-command");
+
+    if (fileExists(workspaceScript)) {
+      return workspaceScript;
+    }
+  }
+
+  const bundledScript =
+    os.platform() === "win32"
+      ? path.join(context.extensionPath, "resources", "scripts", "quick-command.ps1")
+      : path.join(context.extensionPath, "resources", "scripts", "quick-command");
+
+  if (fileExists(bundledScript)) {
+    return bundledScript;
+  }
+
+  return "quick-command";
+}
+
+function runQuickCommand(context: vscode.ExtensionContext, args: string[]) {
+  const terminal = vscode.window.createTerminal("QC1 STM32");
+  const quickCommand = getQuickCommandPath(context);
+  const quotedArgs = args.map((arg) => `"${arg.replace(/"/g, '\\"')}"`).join(" ");
+
+  if (os.platform() === "win32") {
+    terminal.sendText(`powershell -ExecutionPolicy Bypass -File "${quickCommand}" ${quotedArgs}`.trim());
+  } else {
+    terminal.sendText(`chmod +x "${quickCommand}"`);
+    terminal.sendText(`"${quickCommand}" ${quotedArgs}`.trim());
+  }
+
+  terminal.show();
+}
 
 class QC1PanelProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = "qc1.panel";
   private view?: vscode.WebviewView;
   private outputLines: string[] = [];
 
-  constructor(private readonly extensionUri: vscode.Uri) {}
+  constructor(
+    private readonly extensionUri: vscode.Uri,
+    private readonly context: vscode.ExtensionContext
+  ) {}
 
   resolveWebviewView(webviewView: vscode.WebviewView): void {
     this.view = webviewView;
@@ -50,15 +115,11 @@ class QC1PanelProvider implements vscode.WebviewViewProvider {
     this.postStatus("Ready", "idle");
   }
 
-  private getWorkspaceRoot(): string | undefined {
-    return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-  }
-
   private getConfig() {
     const config = vscode.workspace.getConfiguration("qc1");
 
     return {
-      quickCommandPath: config.get<string>("quickCommandPath", "./scripts/quick-command"),
+      quickCommandPath: getQuickCommandPath(this.context),
       autoClearOutput: config.get<boolean>("autoClearOutput", false),
       showTimestamps: config.get<boolean>("showTimestamps", true),
       outputMaxLines: config.get<number>("outputMaxLines", 500),
@@ -67,7 +128,7 @@ class QC1PanelProvider implements vscode.WebviewViewProvider {
   }
 
   private runQC1(command: string) {
-    const root = this.getWorkspaceRoot();
+    const root = getWorkspaceRoot();
     const config = this.getConfig();
 
     if (!root) {
@@ -80,11 +141,11 @@ class QC1PanelProvider implements vscode.WebviewViewProvider {
       this.clearOutput();
     }
 
-    const qc1Path = path.isAbsolute(config.quickCommandPath)
-      ? config.quickCommandPath
-      : path.join(root, config.quickCommandPath);
-
-    const fullCommand = `"${qc1Path}" ${command}`;
+    const quickCommandPath = getQuickCommandPath(this.context);
+    const escapedCommand = command.replace(/"/g, '\\"');
+    const fullCommand = os.platform() === "win32"
+      ? `powershell -ExecutionPolicy Bypass -File "${quickCommandPath}" "${escapedCommand}"`
+      : `chmod +x "${quickCommandPath}" && "${quickCommandPath}" "${escapedCommand}"`;
 
     this.postStatus(`Running: ${command}`, "running");
     this.appendOutput(`$ qc1 ${command}`, "command");
@@ -100,7 +161,7 @@ class QC1PanelProvider implements vscode.WebviewViewProvider {
         this.postStatus(`Done: ${command}`, "success");
       }
 
-      this.appendOutput("--- terminé ---", "separator");
+      this.appendOutput("--- termine ---", "separator");
     });
   }
 
@@ -361,7 +422,7 @@ class QC1PanelProvider implements vscode.WebviewViewProvider {
   <section id="outputPanel" class="panel">
     <div class="card">
       <div class="card-title">Sortie QC1</div>
-      <div id="output">QC1 prêt.</div>
+      <div id="output">QC1 pret.</div>
       <div class="terminal">
         <input id="cmd2" placeholder="health" onkeydown="handleKey2(event)" />
         <button onclick="sendTerminal2()">Run</button>
@@ -371,7 +432,7 @@ class QC1PanelProvider implements vscode.WebviewViewProvider {
 
   <section id="settingsPanel" class="panel">
     <div class="card">
-      <div class="card-title">Paramètres QC1</div>
+      <div class="card-title">Parametres QC1</div>
 
       <div class="setting-row">
         <div class="setting-name">Quick Command Path</div>
@@ -406,7 +467,7 @@ class QC1PanelProvider implements vscode.WebviewViewProvider {
     <div class="card">
       <div class="card-title">Notes</div>
       <div class="hint">
-        Ces paramètres sont stockés dans VSCode. Tu peux les modifier dans Settings, puis cliquer Refresh ici.
+        Ces parametres sont stockes dans VSCode. Tu peux les modifier dans Settings, puis cliquer Refresh ici.
       </div>
     </div>
   </section>
@@ -463,7 +524,7 @@ class QC1PanelProvider implements vscode.WebviewViewProvider {
 
   function appendLines(lines, kind) {
     const output = document.getElementById("output");
-    if (output.textContent === "QC1 prêt.") output.textContent = "";
+    if (output.textContent === "QC1 pret.") output.textContent = "";
 
     for (const line of lines) {
       const div = document.createElement("div");
@@ -516,25 +577,61 @@ class QC1PanelProvider implements vscode.WebviewViewProvider {
 }
 
 export function activate(context: vscode.ExtensionContext) {
-  const provider = new QC1PanelProvider(context.extensionUri);
+  const provider = new QC1PanelProvider(context.extensionUri, context);
 
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(QC1PanelProvider.viewType, provider)
   );
 
-  const runInTerminal = (cmd: string) => {
-    const terminal = vscode.window.createTerminal("QC1");
+  context.subscriptions.push(vscode.commands.registerCommand("qc1.build", () => {
+    runQuickCommand(context, ["make"]);
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand("qc1.clean", () => {
+    runQuickCommand(context, ["clean"]);
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand("qc1.rebuild", () => {
+    runQuickCommand(context, ["clean"]);
+    runQuickCommand(context, ["make"]);
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand("qc1.tsmake", () => {
+    runQuickCommand(context, ["tsmake"]);
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand("qc1.flash", () => {
+    runQuickCommand(context, ["flash"]);
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand("qc1.run", () => {
+    runQuickCommand(context, ["run"]);
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand("qc1.health", () => {
+    runQuickCommand(context, ["health"]);
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand("qc1.status", () => {
+    runQuickCommand(context, ["status"]);
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand("qc1.error", () => {
+    runQuickCommand(context, ["error"]);
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand("qc1.detectStlink", () => {
+    runQuickCommand(context, ["status"]);
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand("qc1.openSerial", () => {
+    runQuickCommand(context, ["serial"]);
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand("qc1.startOpenOcd", () => {
+    const terminal = vscode.window.createTerminal("QC1 OpenOCD");
+    const openocdPath = vscode.workspace.getConfiguration("qc1").get<string>("openocdPath", "openocd");
+    terminal.sendText(openocdPath);
     terminal.show();
-    terminal.sendText(`./scripts/quick-command ${cmd}`);
-  };
-
-  context.subscriptions.push(vscode.commands.registerCommand("qc1.build", () => runInTerminal("make")));
-  context.subscriptions.push(vscode.commands.registerCommand("qc1.tsmake", () => runInTerminal("tsmake")));
-  context.subscriptions.push(vscode.commands.registerCommand("qc1.flash", () => runInTerminal("flash")));
-  context.subscriptions.push(vscode.commands.registerCommand("qc1.health", () => runInTerminal("health")));
-  context.subscriptions.push(vscode.commands.registerCommand("qc1.status", () => runInTerminal("status")));
-  context.subscriptions.push(vscode.commands.registerCommand("qc1.error", () => runInTerminal("error")));
-  context.subscriptions.push(vscode.commands.registerCommand("qc1.dev", () => runInTerminal("dev")));
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand("qc1.configure", () => {
+    vscode.commands.executeCommand("workbench.action.openSettings", "@ext:Mistral400.QC1-STM32-Tools qc1");
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand("qc1.refresh", () => {
+    provider.clearOutput();
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand("qc1.dev", () => {
+    runQuickCommand(context, ["dev"]);
+  }));
   context.subscriptions.push(vscode.commands.registerCommand("qc1.openSettings", () => {
     vscode.commands.executeCommand("workbench.action.openSettings", "@ext:Mistral400.QC1-STM32-Tools");
   }));
