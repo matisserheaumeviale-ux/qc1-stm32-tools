@@ -219,63 +219,97 @@ class QC1PanelProvider implements vscode.WebviewViewProvider {
 <meta charset="UTF-8">
 <style>
   :root {
-    --radius: 8px;
-    --gap: 8px;
+    --qc1-bg: #101214;
+    --qc1-card: #171a1d;
+    --qc1-card-2: #1d2226;
+    --qc1-border: #2b3035;
+    --qc1-text: #e6e6e6;
+    --qc1-muted: #a0a4aa;
+
+    --qc1-blue: #2f8fbd;
+    --qc1-blue-hover: #3ba3d6;
+    --qc1-green: #31b36b;
+    --qc1-orange: #d99a2b;
+    --qc1-red: #d9534f;
+    --qc1-purple: #8b5cf6;
   }
 
   body {
     margin: 0;
-    padding: 10px;
-    color: var(--vscode-foreground);
-    background: var(--vscode-sideBar-background);
+    padding: 16px;
+    background: var(--qc1-bg);
+    color: var(--qc1-text);
     font-family: var(--vscode-font-family);
-    font-size: var(--vscode-font-size);
   }
 
-  .header {
+  .qc1-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-bottom: 10px;
+    margin-bottom: 18px;
   }
 
-  .title {
-    font-weight: 700;
-    font-size: 15px;
+  .qc1-title {
+    font-size: 28px;
+    font-weight: 800;
+    letter-spacing: 0.5px;
   }
 
-  .badge {
-    padding: 3px 7px;
+  .qc1-badge {
+    padding: 6px 14px;
     border-radius: 999px;
-    font-size: 11px;
-    background: var(--vscode-badge-background);
-    color: var(--vscode-badge-foreground);
+    font-weight: 700;
+    background: rgba(49, 179, 107, 0.18);
+    color: #6ee7a3;
+    border: 1px solid rgba(49, 179, 107, 0.45);
   }
 
-  .badge.idle { background: #555; }
-  .badge.running { background: #b58900; }
-  .badge.success { background: #16825d; }
-  .badge.error { background: #b00020; }
+  .qc1-badge.idle {
+    background: rgba(96, 125, 139, 0.18);
+    color: #b8c7cf;
+    border-color: rgba(96, 125, 139, 0.45);
+  }
 
-  .tabs {
+  .qc1-badge.running {
+    background: rgba(217, 154, 43, 0.18);
+    color: #f2c46d;
+    border-color: rgba(217, 154, 43, 0.45);
+  }
+
+  .qc1-badge.success {
+    background: rgba(49, 179, 107, 0.18);
+    color: #6ee7a3;
+    border-color: rgba(49, 179, 107, 0.45);
+  }
+
+  .qc1-badge.error {
+    background: rgba(217, 83, 79, 0.18);
+    color: #ff908d;
+    border-color: rgba(217, 83, 79, 0.45);
+  }
+
+  .qc1-tabs {
     display: grid;
-    grid-template-columns: 1fr 1fr 1fr;
-    gap: 4px;
-    margin-bottom: 10px;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 10px;
+    margin-bottom: 20px;
   }
 
-  .tab {
-    padding: 7px;
-    border: 1px solid var(--vscode-panel-border);
-    background: var(--vscode-button-secondaryBackground);
-    color: var(--vscode-button-secondaryForeground);
+  .qc1-tab {
+    padding: 12px 10px;
+    border-radius: 12px;
+    border: 1px solid var(--qc1-border);
+    background: #151719;
+    color: var(--qc1-text);
+    font-size: 16px;
+    font-weight: 650;
     cursor: pointer;
-    border-radius: var(--radius);
   }
 
-  .tab.active {
-    background: var(--vscode-button-background);
-    color: var(--vscode-button-foreground);
+  .qc1-tab.active {
+    background: linear-gradient(135deg, #2f8fbd, #256f9d);
+    border-color: #4bb4e5;
+    box-shadow: 0 0 0 1px rgba(75, 180, 229, 0.25);
   }
 
   .panel {
@@ -286,187 +320,234 @@ class QC1PanelProvider implements vscode.WebviewViewProvider {
     display: block;
   }
 
-  .grid {
+  .qc1-card {
+    background: linear-gradient(180deg, var(--qc1-card), var(--qc1-card-2));
+    border: 1px solid var(--qc1-border);
+    border-radius: 16px;
+    padding: 18px;
+    margin-bottom: 18px;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.22);
+  }
+
+  .qc1-card-title {
+    font-size: 20px;
+    font-weight: 800;
+    margin-bottom: 14px;
+  }
+
+  .qc1-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: var(--gap);
+    gap: 12px;
   }
 
-  button {
-    padding: 8px;
-    border: 1px solid var(--vscode-button-border);
-    background: var(--vscode-button-background);
-    color: var(--vscode-button-foreground);
+  .qc1-btn {
+    min-height: 54px;
+    border-radius: 13px;
+    border: 1px solid rgba(255,255,255,0.12);
+    color: white;
+    font-size: 17px;
+    font-weight: 800;
     cursor: pointer;
-    border-radius: var(--radius);
+    background: var(--qc1-blue);
+    transition: transform 0.08s ease, filter 0.12s ease, background 0.12s ease;
   }
 
-  button:hover {
-    background: var(--vscode-button-hoverBackground);
+  .qc1-btn:hover {
+    filter: brightness(1.12);
+    transform: translateY(-1px);
   }
 
-  .secondary {
-    background: var(--vscode-button-secondaryBackground);
-    color: var(--vscode-button-secondaryForeground);
+  .qc1-btn:active {
+    transform: translateY(0);
   }
 
-  .card {
-    border: 1px solid var(--vscode-panel-border);
-    background: var(--vscode-editor-background);
-    border-radius: var(--radius);
-    padding: 10px;
-    margin-bottom: 10px;
+  .qc1-btn.health {
+    background: linear-gradient(135deg, var(--qc1-green), #218654);
   }
 
-  .card-title {
-    font-weight: 700;
-    margin-bottom: 7px;
+  .qc1-btn.status {
+    background: linear-gradient(135deg, var(--qc1-blue), #236d95);
   }
 
-  #output {
-    height: 360px;
-    overflow-y: auto;
-    white-space: pre-wrap;
-    background: var(--vscode-editor-background);
-    border: 1px solid var(--vscode-panel-border);
-    border-radius: var(--radius);
-    padding: 8px;
-    font-family: var(--vscode-editor-font-family);
-    font-size: 12px;
-    line-height: 1.45;
+  .qc1-btn.build,
+  .qc1-btn.make {
+    background: linear-gradient(135deg, var(--qc1-purple), #6544c7);
+  }
+
+  .qc1-btn.flash {
+    background: linear-gradient(135deg, var(--qc1-orange), #a96d14);
+  }
+
+  .qc1-btn.errors {
+    background: linear-gradient(135deg, var(--qc1-red), #9f302c);
+  }
+
+  .qc1-btn.dev {
+    background: linear-gradient(135deg, #607d8b, #455a64);
+  }
+
+  .qc1-btn.clear {
+    background: #151719;
+    color: var(--qc1-text);
+    border: 1px solid var(--qc1-border);
   }
 
   .line.command { color: #4fc3f7; }
   .line.stderr { color: #ffb74d; }
   .line.error { color: #ff6b6b; }
   .line.separator { color: #888; }
-  .line.stdout { color: var(--vscode-foreground); }
+  .line.stdout { color: var(--qc1-text); }
 
-  .terminal {
-    display: flex;
-    gap: 5px;
-    margin-top: 8px;
+  .qc1-terminal {
+    min-height: 420px;
+    padding: 16px;
+    border-radius: 14px;
+    border: 1px solid var(--qc1-border);
+    background: #080a0c;
+    color: #d7fbe8;
+    font-family: "SFMono-Regular", Consolas, monospace;
+    font-size: 14px;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    overflow: auto;
   }
 
-  input {
-    flex: 1;
-    background: var(--vscode-input-background);
-    color: var(--vscode-input-foreground);
-    border: 1px solid var(--vscode-input-border);
-    border-radius: var(--radius);
-    padding: 7px;
-  }
-
-  .setting-row {
+  .qc1-input-row {
     display: grid;
     grid-template-columns: 1fr auto;
-    gap: 8px;
-    padding: 6px 0;
-    border-bottom: 1px solid var(--vscode-panel-border);
+    gap: 10px;
+    margin-top: 12px;
   }
 
-  .setting-name {
-    font-weight: 600;
+  .qc1-input {
+    min-height: 46px;
+    padding: 0 14px;
+    border-radius: 12px;
+    border: 1px solid var(--qc1-border);
+    background: #151719;
+    color: var(--qc1-text);
+    font-size: 16px;
   }
 
-  .setting-value {
-    opacity: 0.8;
-    text-align: right;
+  .qc1-run {
+    padding: 0 18px;
+    border-radius: 12px;
+    border: 1px solid #4bb4e5;
+    background: var(--qc1-blue);
+    color: white;
+    font-weight: 800;
+    font-size: 16px;
+  }
+
+  .qc1-setting-row {
+    display: grid;
+    grid-template-columns: 150px 1fr;
+    gap: 12px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--qc1-border);
+  }
+
+  .qc1-setting-label {
+    font-weight: 800;
+  }
+
+  .qc1-setting-value {
+    color: var(--qc1-muted);
     word-break: break-all;
   }
 
-  .hint {
-    opacity: 0.75;
-    font-size: 12px;
-    line-height: 1.4;
+  .qc1-note {
+    color: var(--qc1-muted);
+    line-height: 1.45;
   }
 </style>
 </head>
 <body>
-  <div class="header">
-    <div class="title">QC1 STM32</div>
-    <div id="status" class="badge idle">Ready</div>
+  <div class="qc1-header">
+    <div class="qc1-title">QC1 STM32</div>
+    <div id="status" class="qc1-badge idle">Ready</div>
   </div>
 
-  <div class="tabs">
-    <button class="tab active" onclick="showTab('dashboard')">Dashboard</button>
-    <button class="tab" onclick="showTab('outputPanel')">Output</button>
-    <button class="tab" onclick="showTab('settingsPanel')">Settings</button>
+  <div class="qc1-tabs">
+    <button class="qc1-tab active" onclick="showTab(event, 'dashboard')">Dashboard</button>
+    <button class="qc1-tab" onclick="showTab(event, 'outputPanel')">Output</button>
+    <button class="qc1-tab" onclick="showTab(event, 'settingsPanel')">Settings</button>
   </div>
 
   <section id="dashboard" class="panel active">
-    <div class="card">
-      <div class="card-title">Actions rapides</div>
-      <div class="grid">
-        <button onclick="run('health')">Health</button>
-        <button onclick="run('status')">Status</button>
-        <button onclick="run('tsmake')">Test Make</button>
-        <button onclick="run('make')">Build</button>
-        <button onclick="run('flash')">Flash</button>
-        <button onclick="run('error')">Errors</button>
-        <button onclick="run('dev')">Dev Mode</button>
-        <button class="secondary" onclick="clearOutput()">Clear</button>
+    <div class="qc1-card">
+      <div class="qc1-card-title">Actions rapides</div>
+      <div class="qc1-grid">
+        <button class="qc1-btn health" onclick="run('health')">Health</button>
+        <button class="qc1-btn status" onclick="run('status')">Status</button>
+        <button class="qc1-btn make" onclick="run('tsmake')">Test Make</button>
+        <button class="qc1-btn build" onclick="run('make')">Build</button>
+        <button class="qc1-btn flash" onclick="run('flash')">Flash</button>
+        <button class="qc1-btn errors" onclick="run('error')">Errors</button>
+        <button class="qc1-btn dev" onclick="run('dev')">Dev Mode</button>
+        <button class="qc1-btn clear" onclick="clearOutput()">Clear</button>
       </div>
     </div>
 
-    <div class="card">
-      <div class="card-title">Mini terminal QC1</div>
-      <div class="hint">Tape une commande QC1 : make, health, status, tsmake, flash, error...</div>
-      <div class="terminal">
-        <input id="cmd" placeholder="make" onkeydown="handleKey(event)" />
-        <button onclick="sendTerminal()">Run</button>
+    <div class="qc1-card">
+      <div class="qc1-card-title">Mini terminal QC1</div>
+      <div class="qc1-note">Commandes disponibles : make, health, status, tsmake, flash, error</div>
+      <div class="qc1-input-row">
+        <input id="cmd" class="qc1-input" placeholder="make" onkeydown="handleKey(event)" />
+        <button class="qc1-run" onclick="sendTerminal()">Run</button>
       </div>
     </div>
   </section>
 
   <section id="outputPanel" class="panel">
-    <div class="card">
-      <div class="card-title">Sortie QC1</div>
-      <div id="output">QC1 pret.</div>
-      <div class="terminal">
-        <input id="cmd2" placeholder="health" onkeydown="handleKey2(event)" />
-        <button onclick="sendTerminal2()">Run</button>
+    <div class="qc1-card">
+      <div class="qc1-card-title">Sortie QC1</div>
+      <div id="output" class="qc1-terminal">QC1 pret.</div>
+      <div class="qc1-input-row">
+        <input id="cmd2" class="qc1-input" placeholder="health" onkeydown="handleKey2(event)" />
+        <button class="qc1-run" onclick="sendTerminal2()">Run</button>
       </div>
     </div>
   </section>
 
   <section id="settingsPanel" class="panel">
-    <div class="card">
-      <div class="card-title">Parametres QC1</div>
+    <div class="qc1-card">
+      <div class="qc1-card-title">Parametres QC1</div>
 
-      <div class="setting-row">
-        <div class="setting-name">Quick Command Path</div>
-        <div id="sPath" class="setting-value"></div>
+      <div class="qc1-setting-row">
+        <div class="qc1-setting-label">Quick Command Path</div>
+        <div id="sPath" class="qc1-setting-value"></div>
       </div>
 
-      <div class="setting-row">
-        <div class="setting-name">Auto-clear Output</div>
-        <div id="sAutoClear" class="setting-value"></div>
+      <div class="qc1-setting-row">
+        <div class="qc1-setting-label">Auto-clear Output</div>
+        <div id="sAutoClear" class="qc1-setting-value"></div>
       </div>
 
-      <div class="setting-row">
-        <div class="setting-name">Show Timestamps</div>
-        <div id="sTimestamps" class="setting-value"></div>
+      <div class="qc1-setting-row">
+        <div class="qc1-setting-label">Show Timestamps</div>
+        <div id="sTimestamps" class="qc1-setting-value"></div>
       </div>
 
-      <div class="setting-row">
-        <div class="setting-name">Max Output Lines</div>
-        <div id="sMaxLines" class="setting-value"></div>
+      <div class="qc1-setting-row">
+        <div class="qc1-setting-label">Max Output Lines</div>
+        <div id="sMaxLines" class="qc1-setting-value"></div>
       </div>
 
-      <div class="setting-row">
-        <div class="setting-name">Compact Mode</div>
-        <div id="sCompact" class="setting-value"></div>
+      <div class="qc1-setting-row">
+        <div class="qc1-setting-label">Compact Mode</div>
+        <div id="sCompact" class="qc1-setting-value"></div>
       </div>
 
       <br>
-      <button onclick="openSettings()">Open VSCode Settings</button>
-      <button class="secondary" onclick="refreshSettings()">Refresh</button>
+      <button class="qc1-btn status" onclick="openSettings()">Open VSCode Settings</button>
+      <button class="qc1-btn clear" onclick="refreshSettings()">Refresh</button>
     </div>
 
-    <div class="card">
-      <div class="card-title">Notes</div>
-      <div class="hint">
+    <div class="qc1-card">
+      <div class="qc1-card-title">Notes</div>
+      <div class="qc1-note">
         Ces parametres sont stockes dans VSCode. Tu peux les modifier dans Settings, puis cliquer Refresh ici.
       </div>
     </div>
@@ -475,9 +556,9 @@ class QC1PanelProvider implements vscode.WebviewViewProvider {
 <script>
   const vscode = acquireVsCodeApi();
 
-  function showTab(id) {
+  function showTab(event, id) {
     document.querySelectorAll(".panel").forEach(p => p.classList.remove("active"));
-    document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+    document.querySelectorAll(".qc1-tab").forEach(t => t.classList.remove("active"));
     document.getElementById(id).classList.add("active");
     event.target.classList.add("active");
   }
@@ -539,7 +620,7 @@ class QC1PanelProvider implements vscode.WebviewViewProvider {
   function setStatus(text, state) {
     const el = document.getElementById("status");
     el.textContent = text;
-    el.className = "badge " + state;
+    el.className = "qc1-badge " + state;
   }
 
   function setSettings(settings) {
