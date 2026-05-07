@@ -728,4 +728,3 @@ function activate(context) {
     }));
 }
 function deactivate() { }
-//# sourceMappingURL=extension.js.map

@@ -1,5 +1,1 @@
-{
-  "recommendations": [
-    "matisserheaumeviale.qc1"
-  ]
-}
+const jsonMessage = '{"type": "explanation", "value": ""}';
