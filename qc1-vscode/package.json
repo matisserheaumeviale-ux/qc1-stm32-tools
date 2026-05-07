@@ -2,7 +2,7 @@
   "name": "qc1-stm32-tools",
   "displayName": "QC1 STM32F103 Tools",
   "description": "Interface VSCode pour Quick Command STM32",
-  "version": "0.0.10",
+  "version": "0.0.11",
   "publisher": "Mistral400",
   "icon": "media/icon.png",
   "repository": {
