@@ -196,6 +196,26 @@
           "default": "",
           "description": "Optional custom path to quick-command. If empty, QC1 uses its built-in portable script."
         },
+        "qc1.projectPath": {
+          "type": "string",
+          "default": "",
+          "description": "Chemin du dossier projet STM32. Vide = auto-détection depuis le workspace."
+        },
+        "qc1.makefilePath": {
+          "type": "string",
+          "default": "",
+          "description": "Chemin du dossier contenant le Makefile. Vide = auto-détection."
+        },
+        "qc1.compilerPath": {
+          "type": "string",
+          "default": "",
+          "description": "Chemin vers arm-none-eabi-gcc. Vide = auto-détection dans le PATH."
+        },
+        "qc1.openocdPath": {
+          "type": "string",
+          "default": "",
+          "description": "Chemin vers openocd. Vide = auto-détection dans le PATH."
+        },
         "qc1.serialPort": {
           "type": "string",
           "default": "",
@@ -205,11 +225,6 @@
           "type": "number",
           "default": 19200,
           "description": "UART baud rate"
-        },
-        "qc1.openocdPath": {
-          "type": "string",
-          "default": "openocd",
-          "description": "Path to OpenOCD executable"
         },
         "qc1.stlinkPath": {
           "type": "string",

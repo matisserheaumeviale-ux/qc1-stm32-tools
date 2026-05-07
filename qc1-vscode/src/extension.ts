@@ -16,6 +16,173 @@ function getWorkspaceRoot(): string | undefined {
   return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 }
 
+function findMakefile(dir: string): string | null {
+  const entries = fs.readdirSync(dir, { withFileTypes: true });
+
+  for (const entry of entries) {
+    const fullPath = path.join(dir, entry.name);
+
+    if (entry.isFile() && entry.name === "Makefile") {
+      return dir;
+    }
+
+    if (entry.isDirectory()) {
+      try {
+        const result = findMakefile(fullPath);
+        if (result) {
+          return result;
+        }
+      } catch {}
+    }
+  }
+
+  return null;
+}
+
+function getPathCandidates(name: string): string[] {
+  const pathValue = process.env.PATH || "";
+  const directories = pathValue.split(path.delimiter).filter(Boolean);
+  const extensions = os.platform() === "win32"
+    ? (process.env.PATHEXT || ".EXE;.CMD;.BAT;.COM")
+        .split(";")
+        .filter(Boolean)
+    : [""];
+
+  const candidates: string[] = [];
+
+  for (const dir of directories) {
+    if (os.platform() === "win32") {
+      const lowerName = name.toLowerCase();
+      const hasKnownExt = extensions.some((ext) => lowerName.endsWith(ext.toLowerCase()));
+
+      if (hasKnownExt) {
+        candidates.push(path.join(dir, name));
+      } else {
+        for (const ext of extensions) {
+          candidates.push(path.join(dir, `${name}${ext}`));
+        }
+      }
+    } else {
+      candidates.push(path.join(dir, name));
+    }
+  }
+
+  return candidates;
+}
+
+function findExecutable(name: string): string | null {
+  for (const candidate of getPathCandidates(name)) {
+    if (fileExists(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+type Qc1Status = {
+  projectPath: string;
+  makefileDir: string;
+  projectOk: boolean;
+  makefileOk: boolean;
+  makePath: string;
+  makeOk: boolean;
+  makeSource: string;
+  compilerPath: string;
+  compilerOk: boolean;
+  compilerSource: string;
+  openocdPath: string;
+  openocdOk: boolean;
+  openocdSource: string;
+  stFlashPath: string;
+  stFlashOk: boolean;
+  stFlashSource: string;
+};
+
+function getQc1Status(context: vscode.ExtensionContext): Qc1Status {
+  const config = vscode.workspace.getConfiguration("qc1");
+  const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || "";
+
+  const projectPath = (config.get<string>("projectPath") || "").trim() || workspaceRoot;
+  const makefilePathSetting = (config.get<string>("makefilePath") || "").trim();
+  const compilerPathSetting = (config.get<string>("compilerPath") || "").trim();
+  const openocdPathSetting = (config.get<string>("openocdPath") || "").trim();
+
+  const makefileDir = makefilePathSetting || (projectPath ? findMakefile(projectPath) || "" : "");
+  const bundledMake = path.join(context.extensionPath, "resources", "tools", "windows", "make.exe");
+  const pathMake = findExecutable(os.platform() === "win32" ? "make.exe" : "make");
+  const makePath = os.platform() === "win32"
+    ? (fileExists(bundledMake) ? bundledMake : pathMake || "")
+    : pathMake || "";
+  const makeSource = os.platform() === "win32"
+    ? (fileExists(bundledMake) ? "integre" : pathMake ? "PATH" : "introuvable")
+    : pathMake ? "PATH" : "introuvable";
+
+  const autoCompilerPath = findExecutable(os.platform() === "win32" ? "arm-none-eabi-gcc.exe" : "arm-none-eabi-gcc");
+  const compilerPath = compilerPathSetting || autoCompilerPath || "";
+  const compilerSource = compilerPathSetting ? "setting" : autoCompilerPath ? "PATH" : "introuvable";
+
+  const autoOpenocdPath = findExecutable(os.platform() === "win32" ? "openocd.exe" : "openocd");
+  const openocdPath = openocdPathSetting || autoOpenocdPath || "";
+  const openocdSource = openocdPathSetting ? "setting" : autoOpenocdPath ? "PATH" : "introuvable";
+
+  const autoStFlashPath = findExecutable(os.platform() === "win32" ? "st-flash.exe" : "st-flash");
+  const stFlashPath = autoStFlashPath || "";
+  const stFlashSource = autoStFlashPath ? "PATH" : "introuvable";
+
+  return {
+    projectPath,
+    makefileDir,
+    projectOk: Boolean(projectPath) && fileExists(projectPath),
+    makefileOk: Boolean(makefileDir) && fileExists(path.join(makefileDir, "Makefile")),
+    makePath,
+    makeOk: Boolean(makePath),
+    makeSource,
+    compilerPath: compilerPath || "Not found",
+    compilerOk: Boolean(compilerPath),
+    compilerSource,
+    openocdPath: openocdPath || "Not found",
+    openocdOk: Boolean(openocdPath),
+    openocdSource,
+    stFlashPath: stFlashPath || "Not found",
+    stFlashOk: Boolean(stFlashPath),
+    stFlashSource
+  };
+}
+
+function formatDiagnostic(status: Qc1Status): string {
+  const lines = [
+    "Status outils QC1",
+    "",
+    `Project Folder      ${status.projectOk ? "OK" : "Missing"}`,
+    `Makefile            ${status.makefileOk ? "OK" : "Missing"}`,
+    `Make                ${status.makeOk ? `OK ${status.makeSource}` : "Missing"}`,
+    `ARM GCC             ${status.compilerOk ? `OK ${status.compilerSource}` : "Missing"}`,
+    `OpenOCD             ${status.openocdOk ? `OK ${status.openocdSource}` : "Missing"}`,
+    `ST-Flash            ${status.stFlashOk ? `OK ${status.stFlashSource}` : "Missing"}`,
+    "",
+    "Project folder:",
+    status.projectPath || "Not found",
+    "",
+    "Makefile folder:",
+    status.makefileDir || "Not found",
+    "",
+    "Make:",
+    status.makePath || "Not found",
+    "",
+    "Compiler:",
+    status.compilerPath || "Not found",
+    "",
+    "OpenOCD:",
+    status.openocdPath || "Not found",
+    "",
+    "ST-Flash:",
+    status.stFlashPath || "Not found"
+  ];
+
+  return lines.join("\n");
+}
+
 function getQuickCommandPath(context: vscode.ExtensionContext): string {
   const config = vscode.workspace.getConfiguration("qc1");
   const customPath = config.get<string>("quickCommandPath", "").trim();
@@ -108,10 +275,24 @@ class QC1PanelProvider implements vscode.WebviewViewProvider {
         case "refreshSettings":
           this.sendSettings();
           break;
+
+        case "refreshTools":
+          this.sendToolsStatus();
+          break;
+
+        case "autoDetectPaths":
+          await this.autoDetectPaths();
+          break;
+
+        case "copyDiagnostic":
+          await vscode.env.clipboard.writeText(formatDiagnostic(getQc1Status(this.context)));
+          this.postStatus("Diagnostic copied", "success");
+          break;
       }
     });
 
     this.sendSettings();
+    this.sendToolsStatus();
     this.postStatus("Ready", "idle");
   }
 
@@ -120,6 +301,10 @@ class QC1PanelProvider implements vscode.WebviewViewProvider {
 
     return {
       quickCommandPath: getQuickCommandPath(this.context),
+      projectPath: config.get<string>("projectPath", ""),
+      makefilePath: config.get<string>("makefilePath", ""),
+      compilerPath: config.get<string>("compilerPath", ""),
+      openocdPath: config.get<string>("openocdPath", ""),
       autoClearOutput: config.get<boolean>("autoClearOutput", false),
       showTimestamps: config.get<boolean>("showTimestamps", true),
       outputMaxLines: config.get<number>("outputMaxLines", 500),
@@ -127,9 +312,26 @@ class QC1PanelProvider implements vscode.WebviewViewProvider {
     };
   }
 
+  private async autoDetectPaths() {
+    const config = vscode.workspace.getConfiguration("qc1");
+    const status = getQc1Status(this.context);
+    const updates: Thenable<void>[] = [];
+
+    updates.push(config.update("projectPath", status.projectOk ? status.projectPath : "", vscode.ConfigurationTarget.Workspace));
+    updates.push(config.update("makefilePath", status.makefileOk ? status.makefileDir : "", vscode.ConfigurationTarget.Workspace));
+    updates.push(config.update("compilerPath", status.compilerOk && status.compilerSource === "PATH" ? status.compilerPath : "", vscode.ConfigurationTarget.Workspace));
+    updates.push(config.update("openocdPath", status.openocdOk && status.openocdSource === "PATH" ? status.openocdPath : "", vscode.ConfigurationTarget.Workspace));
+
+    await Promise.all(updates);
+    this.sendSettings();
+    this.sendToolsStatus();
+    this.postStatus("Paths auto-detected", "success");
+  }
+
   private runQC1(command: string) {
     const root = getWorkspaceRoot();
     const config = this.getConfig();
+    const toolStatus = getQc1Status(this.context);
 
     if (!root) {
       this.appendOutput("Aucun workspace ouvert.", "error");
@@ -146,11 +348,15 @@ class QC1PanelProvider implements vscode.WebviewViewProvider {
     const fullCommand = os.platform() === "win32"
       ? `powershell -ExecutionPolicy Bypass -File "${quickCommandPath}" "${escapedCommand}"`
       : `chmod +x "${quickCommandPath}" && "${quickCommandPath}" "${escapedCommand}"`;
+    const makeDir = toolStatus.makefileDir || toolStatus.projectPath || root;
 
     this.postStatus(`Running: ${command}`, "running");
     this.appendOutput(`$ qc1 ${command}`, "command");
 
-    exec(fullCommand, { cwd: root }, (error, stdout, stderr) => {
+    exec(fullCommand, {
+      cwd: makeDir,
+      encoding: "utf8"
+    }, (error, stdout, stderr) => {
       if (stdout) this.appendOutput(stdout, "stdout");
       if (stderr) this.appendOutput(stderr, "stderr");
 
@@ -208,6 +414,13 @@ class QC1PanelProvider implements vscode.WebviewViewProvider {
     this.view?.webview.postMessage({
       type: "settings",
       settings: this.getConfig()
+    });
+  }
+
+  private sendToolsStatus() {
+    this.view?.webview.postMessage({
+      type: "toolsStatus",
+      tools: getQc1Status(this.context)
     });
   }
 
@@ -299,7 +512,7 @@ body {
 
 .qc1-tabs {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 8px;
   margin-bottom: 16px;
 }
@@ -525,6 +738,47 @@ body {
   margin-top: 14px;
 }
 
+.qc1-tools-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.qc1-tool-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 12px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.12);
+}
+
+.qc1-tool-label {
+  font-weight: 850;
+  font-size: 15px;
+  color: var(--qc1-text);
+}
+
+.qc1-tool-state {
+  padding: 5px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 850;
+  border: 1px solid rgba(255,255,255,0.12);
+}
+
+.qc1-tool-state.ok {
+  color: #82e6ad;
+  border-color: rgba(47, 168, 102, 0.55);
+  background: rgba(47, 168, 102, 0.18);
+}
+
+.qc1-tool-state.missing {
+  color: #ff9692;
+  border-color: rgba(201, 68, 63, 0.55);
+  background: rgba(201, 68, 63, 0.18);
+}
+
 @media (max-width: 360px) {
   body {
     padding: 10px;
@@ -575,6 +829,7 @@ body {
     <button class="qc1-tab active" onclick="showTab(event, 'dashboard')">Dashboard</button>
     <button class="qc1-tab" onclick="showTab(event, 'outputPanel')">Output</button>
     <button class="qc1-tab" onclick="showTab(event, 'settingsPanel')">Settings</button>
+    <button class="qc1-tab" onclick="showTab(event, 'toolsPanel')">Tools</button>
   </div>
 
   <section id="dashboard" class="panel active">
@@ -653,6 +908,73 @@ body {
     </div>
   </section>
 
+  <section id="toolsPanel" class="panel">
+    <div class="qc1-card">
+      <div class="qc1-card-title">Status outils QC1</div>
+
+      <div class="qc1-tools-list">
+        <div class="qc1-tool-row">
+          <div class="qc1-tool-label">Dossier projet</div>
+          <div id="toolProjectOk" class="qc1-tool-state missing">introuvable</div>
+        </div>
+        <div class="qc1-tool-row">
+          <div class="qc1-tool-label">Makefile</div>
+          <div id="toolMakefileOk" class="qc1-tool-state missing">introuvable</div>
+        </div>
+        <div class="qc1-tool-row">
+          <div class="qc1-tool-label">Make</div>
+          <div id="toolMakeOk" class="qc1-tool-state missing">introuvable</div>
+        </div>
+        <div class="qc1-tool-row">
+          <div class="qc1-tool-label">Compilateur ARM</div>
+          <div id="toolCompilerOk" class="qc1-tool-state missing">introuvable</div>
+        </div>
+        <div class="qc1-tool-row">
+          <div class="qc1-tool-label">OpenOCD</div>
+          <div id="toolOpenocdOk" class="qc1-tool-state missing">introuvable</div>
+        </div>
+        <div class="qc1-tool-row">
+          <div class="qc1-tool-label">ST-Flash</div>
+          <div id="toolStFlashOk" class="qc1-tool-state missing">introuvable</div>
+        </div>
+      </div>
+
+      <br>
+      <div class="qc1-setting-row">
+        <div class="qc1-setting-label">Project folder</div>
+        <div id="toolProjectPath" class="qc1-setting-value qc1-path"></div>
+      </div>
+      <div class="qc1-setting-row">
+        <div class="qc1-setting-label">Makefile folder</div>
+        <div id="toolMakefilePath" class="qc1-setting-value qc1-path"></div>
+      </div>
+      <div class="qc1-setting-row">
+        <div class="qc1-setting-label">Make</div>
+        <div id="toolMakePath" class="qc1-setting-value qc1-path"></div>
+      </div>
+      <div class="qc1-setting-row">
+        <div class="qc1-setting-label">Compiler</div>
+        <div id="toolCompilerPath" class="qc1-setting-value qc1-path"></div>
+      </div>
+      <div class="qc1-setting-row">
+        <div class="qc1-setting-label">OpenOCD</div>
+        <div id="toolOpenocdPath" class="qc1-setting-value qc1-path"></div>
+      </div>
+      <div class="qc1-setting-row">
+        <div class="qc1-setting-label">ST-Flash</div>
+        <div id="toolStFlashPath" class="qc1-setting-value qc1-path"></div>
+      </div>
+
+      <br>
+      <div class="qc1-grid">
+        <button class="qc1-btn status" onclick="refreshTools()">Refresh Status</button>
+        <button class="qc1-btn clear" onclick="openSettings()">Open VSCode Settings</button>
+        <button class="qc1-btn build" onclick="autoDetectPaths()">Auto-detect Paths</button>
+        <button class="qc1-btn dev" onclick="copyDiagnostic()">Copy Diagnostic</button>
+      </div>
+    </div>
+  </section>
+
 <script>
   const vscode = acquireVsCodeApi();
 
@@ -703,6 +1025,18 @@ body {
     vscode.postMessage({ type: "refreshSettings" });
   }
 
+  function refreshTools() {
+    vscode.postMessage({ type: "refreshTools" });
+  }
+
+  function autoDetectPaths() {
+    vscode.postMessage({ type: "autoDetectPaths" });
+  }
+
+  function copyDiagnostic() {
+    vscode.postMessage({ type: "copyDiagnostic" });
+  }
+
   function appendLines(lines, kind) {
     const output = document.getElementById("output");
     if (output.textContent === "QC1 prêt.") output.textContent = "";
@@ -724,11 +1058,33 @@ body {
   }
 
   function setSettings(settings) {
-    document.getElementById("sPath").textContent = settings.quickCommandPath;
+    document.getElementById("sPath").textContent = settings.quickCommandPath || "auto";
     document.getElementById("sAutoClear").textContent = settings.autoClearOutput;
     document.getElementById("sTimestamps").textContent = settings.showTimestamps;
     document.getElementById("sMaxLines").textContent = settings.outputMaxLines;
     document.getElementById("sCompact").textContent = settings.compactMode;
+  }
+
+  function setToolState(id, ok, label) {
+    const el = document.getElementById(id);
+    el.textContent = label;
+    el.className = "qc1-tool-state " + (ok ? "ok" : "missing");
+  }
+
+  function setToolsStatus(tools) {
+    setToolState("toolProjectOk", tools.projectOk, tools.projectOk ? "OK" : "introuvable");
+    setToolState("toolMakefileOk", tools.makefileOk, tools.makefileOk ? "OK" : "introuvable");
+    setToolState("toolMakeOk", tools.makeOk, tools.makeOk ? "OK" : "introuvable");
+    setToolState("toolCompilerOk", tools.compilerOk, tools.compilerOk ? "OK" : "introuvable");
+    setToolState("toolOpenocdOk", tools.openocdOk, tools.openocdOk ? "OK" : "introuvable");
+    setToolState("toolStFlashOk", tools.stFlashOk, tools.stFlashOk ? "OK" : "introuvable");
+
+    document.getElementById("toolProjectPath").textContent = tools.projectPath || "Not found";
+    document.getElementById("toolMakefilePath").textContent = tools.makefileDir || "Not found";
+    document.getElementById("toolMakePath").textContent = tools.makePath || "Not found";
+    document.getElementById("toolCompilerPath").textContent = tools.compilerPath || "Not found";
+    document.getElementById("toolOpenocdPath").textContent = tools.openocdPath || "Not found";
+    document.getElementById("toolStFlashPath").textContent = tools.stFlashPath || "Not found";
   }
 
   window.addEventListener("message", event => {
@@ -748,6 +1104,10 @@ body {
 
     if (msg.type === "settings") {
       setSettings(msg.settings);
+    }
+
+    if (msg.type === "toolsStatus") {
+      setToolsStatus(msg.tools);
     }
   });
 </script>
@@ -800,7 +1160,9 @@ export function activate(context: vscode.ExtensionContext) {
   }));
   context.subscriptions.push(vscode.commands.registerCommand("qc1.startOpenOcd", () => {
     const terminal = vscode.window.createTerminal("QC1 OpenOCD");
-    const openocdPath = vscode.workspace.getConfiguration("qc1").get<string>("openocdPath", "openocd");
+    const openocdPath = getQc1Status(context).openocdOk
+      ? getQc1Status(context).openocdPath
+      : "openocd";
     terminal.sendText(openocdPath);
     terminal.show();
   }));
