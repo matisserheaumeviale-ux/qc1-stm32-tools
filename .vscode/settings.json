@@ -1,0 +1,6 @@
+{
+    "qc1.projectPath": "/Users/matisserheaume-viale/Code/AFLC/qc1-stm32-tools",
+    "qc1.makefilePath": "",
+    "qc1.compilerPath": "/opt/homebrew/bin/arm-none-eabi-gcc",
+    "qc1.openocdPath": "/opt/homebrew/bin/openocd"
+}
