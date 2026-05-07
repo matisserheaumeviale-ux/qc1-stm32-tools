@@ -10,11 +10,12 @@
     "url": "https://github.com/matisserheaumeviale-ux/qc1-stm32-tools.git"
   },
   "files": [
-    "out",
-    "media",
-    "resources",
-    "package.json",
-    "README.md"
+    "out/**",
+    "media/**",
+    "resources/**",
+    "README.md",
+    "LICENSE",
+    "package.json"
   ],
   "engines": {
     "vscode": "^1.118.0"

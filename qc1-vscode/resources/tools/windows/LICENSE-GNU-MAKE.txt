@@ -1,0 +1,2 @@
+GNU Make is distributed under the GNU General Public License.
+If bundled, include the corresponding GNU Make license and source notice.

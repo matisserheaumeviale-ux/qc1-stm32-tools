@@ -201,36 +201,38 @@ class QC1PanelProvider {
 
 body {
   margin: 0;
-  padding: 14px 10px;
+  font-family: var(--vscode-font-family);
+  padding: 14px;
   background:
     radial-gradient(circle at top left, rgba(47,145,199,0.12), transparent 34%),
-    var(--qc1-bg);
-  color: var(--qc1-text);
-  font-family: var(--vscode-font-family);
+    linear-gradient(180deg, #07141b 0%, #081016 100%);
+  color: var(--vscode-foreground);
   font-size: 13px;
+  overflow-x: hidden;
 }
 
 .qc1-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 10px;
   margin-bottom: 14px;
 }
 
 .qc1-title {
-  font-size: clamp(22px, 8vw, 32px);
+  font-size: 32px;
   font-weight: 900;
-  letter-spacing: 0.3px;
-  line-height: 1;
+  letter-spacing: -1px;
+  line-height: 0.9;
 }
 
 .qc1-badge {
   flex: 0 0 auto;
-  padding: 7px 14px;
+  padding: 8px 14px;
   border-radius: 999px;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 800;
+  white-space: nowrap;
   background: rgba(96, 125, 139, 0.18);
   color: #c6d3da;
   border: 1px solid rgba(96, 125, 139, 0.55);
@@ -256,20 +258,22 @@ body {
 
 .qc1-tabs {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(3, 1fr);
   gap: 8px;
-  margin-bottom: 14px;
+  margin-bottom: 16px;
 }
 
 .qc1-tab {
   min-width: 0;
   padding: 10px 6px;
-  border-radius: 14px;
+  border-radius: 18px;
   border: 1px solid var(--qc1-border);
   background: #101417;
   color: var(--qc1-text);
-  font-size: clamp(13px, 4vw, 16px);
+  font-size: 15px;
   font-weight: 800;
+  text-align: center;
+  white-space: nowrap;
   cursor: pointer;
 }
 
@@ -290,33 +294,35 @@ body {
 .qc1-card {
   background: linear-gradient(180deg, var(--qc1-card), var(--qc1-card-2));
   border: 1px solid var(--qc1-border);
-  border-radius: 20px;
-  padding: 14px;
-  margin-bottom: 14px;
+  border-radius: 24px;
+  padding: 20px;
+  margin-bottom: 18px;
   box-shadow: 0 14px 32px rgba(0, 0, 0, 0.28);
+  width: 100%;
 }
 
 .qc1-card-title {
-  font-size: clamp(19px, 6vw, 24px);
+  font-size: 26px;
   font-weight: 900;
-  margin-bottom: 14px;
-  line-height: 1.1;
+  margin: 0 0 18px 0;
+  line-height: 1.05;
 }
 
 .qc1-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
 }
 
 .qc1-btn {
+  width: 100%;
   min-width: 0;
   min-height: 46px;
-  padding: 8px 10px;
-  border-radius: 14px;
+  padding: 16px 8px;
+  border-radius: 18px;
   border: 1px solid rgba(255,255,255,0.13);
   color: white;
-  font-size: clamp(13px, 4.2vw, 16px);
+  font-size: 16px;
   line-height: 1.1;
   font-weight: 850;
   cursor: pointer;
@@ -372,17 +378,19 @@ body {
 }
 
 .qc1-terminal {
-  height: 330px;
-  padding: 14px;
-  border-radius: 16px;
+  height: 360px;
+  max-height: 48vh;
+  padding: 18px;
+  border-radius: 22px;
   border: 1px solid var(--qc1-border);
   background: #05090a;
   color: #c9f7da;
-  font-family: "SFMono-Regular", Menlo, Consolas, monospace;
-  font-size: 13px;
-  line-height: 1.55;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 14px;
+  line-height: 1.45;
   white-space: pre-wrap;
   overflow: auto;
+  word-break: break-word;
 }
 
 .line.command { color: #60c7f1; }
@@ -393,20 +401,21 @@ body {
 
 .qc1-input-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 72px;
-  gap: 8px;
-  margin-top: 12px;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  margin-top: 14px;
 }
 
 .qc1-input {
   min-width: 0;
+  width: 100%;
   min-height: 44px;
-  padding: 0 12px;
-  border-radius: 14px;
+  padding: 12px 14px;
+  border-radius: 16px;
   border: 1px solid var(--qc1-border);
   background: #101417;
   color: var(--qc1-text);
-  font-size: 14px;
+  font-size: 15px;
 }
 
 .qc1-input:focus {
@@ -415,15 +424,15 @@ body {
 }
 
 .qc1-run {
-  min-width: 0;
+  min-width: 92px;
   min-height: 44px;
-  padding: 0 10px;
-  border-radius: 14px;
+  padding: 12px 18px;
+  border-radius: 16px;
   border: 1px solid #60c7f1;
   background: linear-gradient(135deg, #38a9df, #237ca8);
   color: white;
   font-weight: 850;
-  font-size: 14px;
+  font-size: 16px;
   cursor: pointer;
 }
 
@@ -437,14 +446,16 @@ body {
   display: flex;
   flex-direction: column;
   gap: 5px;
-  padding-bottom: 10px;
-  border-bottom: 1px solid var(--qc1-border);
+  padding: 12px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.12);
 }
 
 .qc1-setting-label {
+  display: block;
   font-weight: 850;
-  font-size: 13px;
+  font-size: 15px;
   color: var(--qc1-text);
+  margin-bottom: 8px;
 }
 
 .qc1-setting-value {
@@ -455,8 +466,9 @@ body {
 .qc1-path {
   max-height: 84px;
   overflow: auto;
-  padding: 8px;
-  border-radius: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 14px;
   background: #0b0f12;
   border: 1px solid var(--qc1-border);
   font-family: "SFMono-Regular", Menlo, Consolas, monospace;
@@ -470,6 +482,45 @@ body {
   grid-template-columns: 1fr 90px;
   gap: 8px;
   margin-top: 14px;
+}
+
+@media (max-width: 360px) {
+  body {
+    padding: 10px;
+  }
+
+  .qc1-title {
+    font-size: 28px;
+  }
+
+  .qc1-badge {
+    font-size: 13px;
+    padding: 7px 12px;
+  }
+
+  .qc1-tab {
+    font-size: 13px;
+    padding: 9px 4px;
+  }
+
+  .qc1-card {
+    padding: 16px;
+    border-radius: 22px;
+  }
+
+  .qc1-card-title {
+    font-size: 23px;
+  }
+
+  .qc1-btn {
+    font-size: 14px;
+    padding: 14px 6px;
+  }
+
+  .qc1-terminal {
+    height: 330px;
+    font-size: 13px;
+  }
 }
   </style>
 </head>
@@ -513,7 +564,7 @@ body {
   <section id="outputPanel" class="panel">
     <div class="qc1-card">
       <div class="qc1-card-title">Sortie QC1</div>
-      <div id="output" class="qc1-terminal">QC1 pret.</div>
+      <div id="output" class="qc1-terminal">QC1 prêt.</div>
       <div class="qc1-input-row">
         <input id="cmd2" class="qc1-input" placeholder="health" onkeydown="handleKey2(event)" />
         <button class="qc1-run" onclick="sendTerminal2()">Run</button>
@@ -523,35 +574,29 @@ body {
 
   <section id="settingsPanel" class="panel">
     <div class="qc1-card">
-      <div class="qc1-card-title">Parametres QC1</div>
+      <div class="qc1-card-title">Paramètres QC1</div>
 
       <div class="qc1-settings-list">
-  <div class="qc1-setting-row">
-    <div class="qc1-setting-label">Quick Command Path</div>
-    <div id="sPath" class="qc1-setting-value qc1-path"></div>
-  </div><div class="qc1-setting-row">
-  <div class="qc1-setting-label">Compact Mode</div>
-  <div id="sCompact" class="qc1-setting-value"></div>
-</div>
-</div>
-      <div class="qc1-setting-row">
-        <div class="qc1-setting-label">Auto-clear Output</div>
-        <div id="sAutoClear" class="qc1-setting-value"></div>
-      </div>
-
-      <div class="qc1-setting-row">
-        <div class="qc1-setting-label">Show Timestamps</div>
-        <div id="sTimestamps" class="qc1-setting-value"></div>
-      </div>
-
-      <div class="qc1-setting-row">
-        <div class="qc1-setting-label">Max Output Lines</div>
-        <div id="sMaxLines" class="qc1-setting-value"></div>
-      </div>
-
-      <div class="qc1-setting-row">
-        <div class="qc1-setting-label">Compact Mode</div>
-        <div id="sCompact" class="qc1-setting-value"></div>
+        <div class="qc1-setting-row">
+          <div class="qc1-setting-label">Quick Command Path</div>
+          <div id="sPath" class="qc1-setting-value qc1-path"></div>
+        </div>
+        <div class="qc1-setting-row">
+          <div class="qc1-setting-label">Auto-clear Output</div>
+          <div id="sAutoClear" class="qc1-setting-value"></div>
+        </div>
+        <div class="qc1-setting-row">
+          <div class="qc1-setting-label">Show Timestamps</div>
+          <div id="sTimestamps" class="qc1-setting-value"></div>
+        </div>
+        <div class="qc1-setting-row">
+          <div class="qc1-setting-label">Max Output Lines</div>
+          <div id="sMaxLines" class="qc1-setting-value"></div>
+        </div>
+        <div class="qc1-setting-row">
+          <div class="qc1-setting-label">Compact Mode</div>
+          <div id="sCompact" class="qc1-setting-value"></div>
+        </div>
       </div>
 
       <br>
@@ -562,7 +607,7 @@ body {
     <div class="qc1-card">
       <div class="qc1-card-title">Notes</div>
       <div class="qc1-note">
-        Ces parametres sont stockes dans VSCode. Tu peux les modifier dans Settings, puis cliquer Refresh ici.
+        Ces paramètres sont stockés dans VSCode. Tu peux les modifier dans Settings, puis cliquer Refresh ici.
       </div>
     </div>
   </section>
@@ -619,7 +664,7 @@ body {
 
   function appendLines(lines, kind) {
     const output = document.getElementById("output");
-    if (output.textContent === "QC1 pret.") output.textContent = "";
+    if (output.textContent === "QC1 prêt.") output.textContent = "";
 
     for (const line of lines) {
       const div = document.createElement("div");
@@ -728,3 +773,4 @@ function activate(context) {
     }));
 }
 function deactivate() { }
+//# sourceMappingURL=extension.js.map
