@@ -1,9 +1,0 @@
-Très important
-
-Dans le terminal, quand tu lances make, utilise :
-
-cwd: status.makefileDir || status.projectPath
-
-Sinon ton ami aura encore :
-
-Aucun Makefile trouvé
