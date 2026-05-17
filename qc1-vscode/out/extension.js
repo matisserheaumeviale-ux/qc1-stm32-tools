@@ -10,6 +10,7 @@ const path = require("path");
 const dashboardState_1 = require("./dashboard/dashboardState");
 const dashboardHtml_1 = require("./dashboard/dashboardHtml");
 const qc1Parser_1 = require("./qc1/qc1Parser");
+const aiPanel_1 = require("./ai/aiPanel");
 let dashboardState = dashboardState_1.defaultDashboardState;
 let dashboardPanel;
 let progressTimer;
@@ -624,7 +625,9 @@ function activate(context) {
     context.subscriptions.push(outputChannel);
     syncDashboardState(context);
     const provider = new QC1PanelProvider(context.extensionUri, context);
+    const aiProvider = new aiPanel_1.LiixAiPanelProvider(context.extensionUri);
     context.subscriptions.push(vscode.window.registerWebviewViewProvider(QC1PanelProvider.viewType, provider));
+    context.subscriptions.push(vscode.window.registerWebviewViewProvider(aiPanel_1.LiixAiPanelProvider.viewType, aiProvider));
     context.subscriptions.push(vscode.commands.registerCommand("qc1.build", () => {
         runQuickCommand(context, ["make"]);
     }));

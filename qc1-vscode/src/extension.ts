@@ -12,6 +12,7 @@ import {
 } from "./dashboard/dashboardState";
 import { getDashboardHtml } from "./dashboard/dashboardHtml";
 import { parseQc1Output } from "./qc1/qc1Parser";
+import { LiixAiPanelProvider } from "./ai/aiPanel";
 
 let dashboardState: DashboardState = defaultDashboardState;
 let dashboardPanel: vscode.WebviewView | undefined;
@@ -777,9 +778,13 @@ export function activate(context: vscode.ExtensionContext) {
   syncDashboardState(context);
 
   const provider = new QC1PanelProvider(context.extensionUri, context);
+  const aiProvider = new LiixAiPanelProvider(context.extensionUri);
 
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(QC1PanelProvider.viewType, provider)
+  );
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(LiixAiPanelProvider.viewType, aiProvider)
   );
 
   context.subscriptions.push(vscode.commands.registerCommand("qc1.build", () => {

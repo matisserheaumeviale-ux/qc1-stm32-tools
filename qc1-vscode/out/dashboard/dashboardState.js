@@ -51,7 +51,7 @@ exports.defaultDashboardState = {
     },
     environment: {
         os: process.platform,
-        extensionVersion: "0.1.1",
+        extensionVersion: "0.1.2",
         quickCommandPath: "quick-command",
         makePath: "--",
         bundledMakePath: "--",
