@@ -27,7 +27,16 @@ function getWorkspaceRoot() {
     return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 }
 function findMakefile(dir) {
-    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    if (!dir || !fileExists(dir)) {
+        return null;
+    }
+    let entries;
+    try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+    }
+    catch {
+        return null;
+    }
     for (const entry of entries) {
         const fullPath = path.join(dir, entry.name);
         if (entry.isFile() && entry.name === "Makefile") {
@@ -81,13 +90,18 @@ function findExecutable(name) {
     }
     return null;
 }
+function getExistingSettingPath(config, key) {
+    const configuredPath = (config.get(key) || "").trim();
+    return configuredPath && fileExists(configuredPath) ? configuredPath : "";
+}
 function getQc1Status(context) {
     const config = vscode.workspace.getConfiguration("qc1");
-    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || "";
-    const projectPath = (config.get("projectPath") || "").trim() || workspaceRoot;
-    const makefilePathSetting = (config.get("makefilePath") || "").trim();
-    const compilerPathSetting = (config.get("compilerPath") || "").trim();
-    const openocdPathSetting = (config.get("openocdPath") || "").trim();
+    const workspaceRoot = getWorkspaceRoot() || "";
+    const projectPathSetting = getExistingSettingPath(config, "projectPath");
+    const makefilePathSetting = getExistingSettingPath(config, "makefilePath");
+    const compilerPathSetting = getExistingSettingPath(config, "compilerPath");
+    const openocdPathSetting = getExistingSettingPath(config, "openocdPath");
+    const projectPath = projectPathSetting || workspaceRoot;
     const makefileDir = makefilePathSetting || (projectPath ? findMakefile(projectPath) || "" : "");
     const bundledMake = path.join(context.extensionPath, "resources", "tools", "windows", "make.exe");
     const pathMake = findExecutable(os.platform() === "win32" ? "make.exe" : "make");
@@ -615,7 +629,7 @@ function buildQc1Env(context) {
         const windowsToolsDir = getWindowsToolsDir(context);
         const makeExe = path.join(windowsToolsDir, "make.exe");
         if (fs.existsSync(makeExe)) {
-            env.PATH = `${windowsToolsDir};${env.PATH ?? ""}`;
+            env.PATH = `${windowsToolsDir}${path.delimiter}${env.PATH ?? ""}`;
         }
     }
     return env;
