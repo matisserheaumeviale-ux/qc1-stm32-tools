@@ -19,9 +19,9 @@ exports.LIIX_MODELS = [
     }
 ];
 exports.modelMap = {
-    "liix-code-0.1": "liix-code-0.1-alpha-experimental:latest",
-    "liix-code-0.1-mini": "qwen2.5-coder:7b-instruct",
-    "liix-code-a1": "liix-code-0.1A:latest"
+    "liix-code-0.1": "liix-code-0.1",
+    "liix-code-0.1-mini": "liix-code-0.1-mini",
+    "liix-code-a1": "liix-code-a1"
 };
 exports.modelOptions = {
     "liix-code-0.1": {

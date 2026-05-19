@@ -2,7 +2,7 @@
   "name": "qc1-stm32-tools",
   "displayName": "QC1 STM32F103 Tools",
   "description": "Interface VSCode pour Quick Command STM32",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "publisher": "Mistral400",
   "icon": "media/icon.png",
   "repository": {
@@ -305,6 +305,15 @@
       {
         "title": "Liix AI",
         "properties": {
+          "liix.provider": {
+            "type": "string",
+            "default": "liix",
+            "enum": [
+              "liix",
+              "local"
+            ],
+            "description": "AI provider to use: Liix cloud API or local model server"
+          },
           "liix.apiUrl": {
             "type": "string",
             "default": "https://true-mega-shall-icq.trycloudflare.com",
@@ -314,6 +323,25 @@
             "type": "string",
             "default": "",
             "description": "Liix API Key"
+          },
+          "liix.localApiUrl": {
+            "type": "string",
+            "default": "http://localhost:11434",
+            "description": "Local AI server URL. Example: Ollama http://localhost:11434 or LM Studio http://localhost:1234"
+          },
+          "liix.localApiType": {
+            "type": "string",
+            "default": "ollama",
+            "enum": [
+              "ollama",
+              "openai-compatible"
+            ],
+            "description": "Local AI server API type"
+          },
+          "liix.localModel": {
+            "type": "string",
+            "default": "qwen2.5-coder:7b-instruct",
+            "description": "Local model name to use"
           }
         }
       }

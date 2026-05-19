@@ -22,9 +22,9 @@ export const LIIX_MODELS = [
 ];
 
 export const modelMap: Record<string, string> = {
-  "liix-code-0.1": "liix-code-0.1-alpha-experimental:latest",
-  "liix-code-0.1-mini": "qwen2.5-coder:7b-instruct",
-  "liix-code-a1": "liix-code-0.1A:latest"
+  "liix-code-0.1": "liix-code-0.1",
+  "liix-code-0.1-mini": "liix-code-0.1-mini",
+  "liix-code-a1": "liix-code-a1"
 };
 
 export const modelOptions: Record<string, { temperature: number; top_p: number }> = {
