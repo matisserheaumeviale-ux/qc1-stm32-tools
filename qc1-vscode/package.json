@@ -2,7 +2,7 @@
   "name": "qc1-stm32-tools",
   "displayName": "QC1 STM32F103 Tools",
   "description": "Interface VSCode pour Quick Command STM32",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "publisher": "Mistral400",
   "icon": "media/icon.png",
   "repository": {
@@ -14,6 +14,7 @@
     "media/**",
     "resources/**",
     "QC1_CODES.md",
+    "CHANGELOG.md",
     "README.md",
     "LICENSE",
     "package.json"
@@ -342,6 +343,101 @@
             "type": "string",
             "default": "qwen2.5-coder:7b-instruct",
             "description": "Local model name to use"
+          },
+          "liix.defaultModel": {
+            "type": "string",
+            "default": "liix-code-0.1",
+            "description": "Default Liix model selected in the webview"
+          },
+          "liix.userName": {
+            "type": "string",
+            "default": "Utilisateur Liix",
+            "description": "Display name used in the Liix Account page"
+          },
+          "liix.accountEmail": {
+            "type": "string",
+            "default": "",
+            "description": "Optional account email/provider label shown in the Liix Account page"
+          },
+          "liix.language": {
+            "type": "string",
+            "default": "fr",
+            "enum": [
+              "fr",
+              "en"
+            ],
+            "description": "Liix UI language"
+          },
+          "liix.uiAnimations": {
+            "type": "boolean",
+            "default": true,
+            "description": "Enable lightweight Liix UI animations"
+          },
+          "liix.telemetry": {
+            "type": "boolean",
+            "default": false,
+            "description": "Enable Liix telemetry"
+          },
+          "liix.agentMode": {
+            "type": "string",
+            "default": "chat",
+            "enum": [
+              "chat",
+              "agent",
+              "full"
+            ],
+            "description": "Default Liix agent mode"
+          },
+          "liix.aiTimeoutMs": {
+            "type": "number",
+            "default": 120000,
+            "minimum": 5000,
+            "maximum": 600000,
+            "description": "AI request and tool execution timeout"
+          },
+          "liix.maxTokens": {
+            "type": "number",
+            "default": 4096,
+            "minimum": 256,
+            "maximum": 131072,
+            "description": "Maximum response tokens target"
+          },
+          "liix.temperature": {
+            "type": "number",
+            "default": 0.2,
+            "minimum": 0,
+            "maximum": 2,
+            "description": "Default model temperature"
+          },
+          "liix.permissions.terminal": {
+            "type": "string",
+            "default": "ask",
+            "enum": [
+              "none",
+              "ask",
+              "allow"
+            ],
+            "description": "Terminal command permission policy"
+          },
+          "liix.permissions.files": {
+            "type": "string",
+            "default": "ask",
+            "enum": [
+              "none",
+              "ask",
+              "allow"
+            ],
+            "description": "File write permission policy"
+          },
+          "liix.permissions.git": {
+            "type": "string",
+            "default": "ask",
+            "enum": [
+              "read",
+              "ask",
+              "allow"
+            ],
+            "description": "Git command permission policy"
           }
         }
       }

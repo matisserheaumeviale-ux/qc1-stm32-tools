@@ -1,9 +1,27 @@
 import * as vscode from "vscode";
 
-import { getBackendModelId } from "./aiModels";
+import { getBackendModelId, liixAiModels } from "./aiModels";
 
-type LiixProvider = "liix" | "local";
-type LiixLocalApiType = "ollama" | "openai-compatible";
+export type LiixProvider = "liix" | "local";
+export type LiixRuntimeMode = "local" | "cloud" | "hybrid";
+export type LiixLocalApiType = "ollama" | "openai-compatible";
+
+export interface LiixAvailableModel {
+  id: string;
+  label: string;
+  provider: LiixProvider;
+  source: "liix" | "ollama" | "openai-compatible";
+}
+
+export interface LiixRuntimeConfig {
+  provider: LiixProvider;
+  mode: LiixRuntimeMode;
+  endpoint: string;
+  model: string;
+  localApiType: LiixLocalApiType;
+  localModel: string;
+  models: LiixAvailableModel[];
+}
 
 function getLiixApiUrl(): string {
   return vscode.workspace
@@ -29,6 +47,119 @@ export function getLiixLocalApiType(): LiixLocalApiType {
 
 export function getLiixLocalModel(): string {
   return vscode.workspace.getConfiguration().get<string>("liix.localModel", "qwen2.5-coder:7b-instruct");
+}
+
+export function getActiveLiixEndpoint(): string {
+  return getLiixProvider() === "local" ? getLiixLocalApiUrl() : getLiixApiUrl();
+}
+
+export function getActiveLiixModel(): string {
+  return getLiixProvider() === "local"
+    ? getLiixLocalModel()
+    : vscode.workspace.getConfiguration().get<string>("liix.defaultModel", liixAiModels[0].id);
+}
+
+export async function updateLiixRuntimeConfig(update: Partial<{
+  provider: LiixProvider;
+  localApiType: LiixLocalApiType;
+  localApiUrl: string;
+  localModel: string;
+  defaultModel: string;
+}>): Promise<void> {
+  const config = vscode.workspace.getConfiguration();
+
+  if (update.provider) {
+    await config.update("liix.provider", update.provider, vscode.ConfigurationTarget.Workspace);
+  }
+
+  if (update.localApiType) {
+    await config.update("liix.localApiType", update.localApiType, vscode.ConfigurationTarget.Workspace);
+  }
+
+  if (typeof update.localApiUrl === "string") {
+    await config.update("liix.localApiUrl", update.localApiUrl, vscode.ConfigurationTarget.Workspace);
+  }
+
+  if (typeof update.localModel === "string") {
+    await config.update("liix.localModel", update.localModel, vscode.ConfigurationTarget.Workspace);
+  }
+
+  if (typeof update.defaultModel === "string") {
+    await config.update("liix.defaultModel", update.defaultModel, vscode.ConfigurationTarget.Workspace);
+  }
+}
+
+export async function setActiveLiixModel(modelId: string): Promise<void> {
+  const configKey = getLiixProvider() === "local" ? "liix.localModel" : "liix.defaultModel";
+  await vscode.workspace.getConfiguration().update(configKey, modelId, vscode.ConfigurationTarget.Workspace);
+}
+
+export async function getLiixRuntimeConfig(): Promise<LiixRuntimeConfig> {
+  const provider = getLiixProvider();
+  const localMode = provider === "local";
+  const models = await getAvailableLiixModels();
+  let model = localMode ? getLiixLocalModel() : vscode.workspace.getConfiguration().get<string>("liix.defaultModel", liixAiModels[0].id);
+
+  if (!models.some((item) => item.id === model) && models[0]) {
+    model = models[0].id;
+    await setActiveLiixModel(model);
+  }
+
+  return {
+    provider,
+    mode: localMode ? "local" : "cloud",
+    endpoint: localMode ? getLiixLocalApiUrl() : getLiixApiUrl(),
+    model,
+    localApiType: getLiixLocalApiType(),
+    localModel: getLiixLocalModel(),
+    models
+  };
+}
+
+export async function getAvailableLiixModels(): Promise<LiixAvailableModel[]> {
+  const provider = getLiixProvider();
+
+  if (provider === "liix") {
+    return liixAiModels.map((model) => ({
+      id: model.id,
+      label: model.label,
+      provider: "liix",
+      source: "liix"
+    }));
+  }
+
+  const localApiType = getLiixLocalApiType();
+  const localApiUrl = normalizeApiUrl(getLiixLocalApiUrl());
+
+  try {
+    if (localApiType === "ollama") {
+      return withLocalModelFallback(normalizeOllamaModels(await getJson(`${localApiUrl}/api/tags`, "Local Ollama API")), localApiType);
+    }
+
+    return withLocalModelFallback(normalizeOpenAiModels(await getJson(`${localApiUrl}/v1/models`, "Local OpenAI-compatible API")), localApiType);
+  } catch {
+    const fallback = getLiixLocalModel();
+    return [{
+      id: fallback,
+      label: fallback,
+      provider: "local",
+      source: localApiType === "ollama" ? "ollama" : "openai-compatible"
+    }];
+  }
+}
+
+function withLocalModelFallback(models: LiixAvailableModel[], localApiType: LiixLocalApiType): LiixAvailableModel[] {
+  if (models.length > 0) {
+    return models;
+  }
+
+  const fallback = getLiixLocalModel();
+  return [{
+    id: fallback,
+    label: fallback,
+    provider: "local",
+    source: localApiType === "ollama" ? "ollama" : "openai-compatible"
+  }];
 }
 
 export interface AiClientRequest {
@@ -105,7 +236,7 @@ export async function sendLiixChat(request: {
   }
 
   if (provider === "local") {
-    return sendLocalLiixChat(message);
+    return sendLocalLiixChat(message, request.model);
   }
 
   throw new Error(`Invalid Liix provider "${provider}". Expected "liix" or "local".`);
@@ -124,10 +255,10 @@ function getLiixRequestMessage(request: {
     .at(-1)?.content ?? "";
 }
 
-async function sendLocalLiixChat(message: string): Promise<LiixChatResponse> {
+async function sendLocalLiixChat(message: string, modelOverride?: string): Promise<LiixChatResponse> {
   const localApiType = getLiixLocalApiType();
   const localApiUrl = normalizeApiUrl(getLiixLocalApiUrl());
-  const localModel = getLiixLocalModel();
+  const localModel = modelOverride || getLiixLocalModel();
 
   if (localApiType === "ollama") {
     console.log("[Liix] POST local Ollama /api/generate", {
@@ -211,6 +342,35 @@ async function postJson(url: string, options: {
   }
 }
 
+async function getJson(url: string, errorPrefix: string): Promise<unknown> {
+  let response: Response;
+
+  try {
+    response = await fetch(url, {
+      method: "GET",
+      headers: {
+        "Content-Type": "application/json"
+      }
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`${errorPrefix} connection failed. Check that the server is running at ${url}. ${detail}`);
+  }
+
+  const responseText = await response.text();
+
+  if (!response.ok) {
+    throw new Error(`${errorPrefix} error: ${response.status} ${response.statusText}${formatResponseSnippet(responseText)}`);
+  }
+
+  try {
+    return responseText ? JSON.parse(responseText) : {};
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`${errorPrefix} returned invalid JSON. ${detail}`);
+  }
+}
+
 function normalizeApiUrl(apiUrl: string): string {
   return apiUrl.replace(/\/+$/, "");
 }
@@ -276,6 +436,60 @@ function normalizeOpenAiCompatibleResponse(data: unknown): LiixChatResponse {
     usage: response.usage,
     server: response.model
   };
+}
+
+function normalizeOllamaModels(data: unknown): LiixAvailableModel[] {
+  const response = getObjectResponse(data, "Local Ollama models response is invalid.");
+  const models = response.models;
+
+  if (!Array.isArray(models)) {
+    return [];
+  }
+
+  return models
+    .map((model): LiixAvailableModel | undefined => {
+      if (!model || typeof model !== "object") {
+        return undefined;
+      }
+
+      const item = model as Record<string, unknown>;
+      const id = typeof item.name === "string" ? item.name : undefined;
+
+      return id ? {
+        id,
+        label: id,
+        provider: "local" as const,
+        source: "ollama" as const
+      } : undefined;
+    })
+    .filter((model): model is LiixAvailableModel => model !== undefined);
+}
+
+function normalizeOpenAiModels(data: unknown): LiixAvailableModel[] {
+  const response = getObjectResponse(data, "Local OpenAI-compatible models response is invalid.");
+  const models = response.data;
+
+  if (!Array.isArray(models)) {
+    return [];
+  }
+
+  return models
+    .map((model): LiixAvailableModel | undefined => {
+      if (!model || typeof model !== "object") {
+        return undefined;
+      }
+
+      const item = model as Record<string, unknown>;
+      const id = typeof item.id === "string" ? item.id : undefined;
+
+      return id ? {
+        id,
+        label: id,
+        provider: "local" as const,
+        source: "openai-compatible" as const
+      } : undefined;
+    })
+    .filter((model): model is LiixAvailableModel => model !== undefined);
 }
 
 function getObjectResponse(data: unknown, invalidMessage: string): Record<string, unknown> {

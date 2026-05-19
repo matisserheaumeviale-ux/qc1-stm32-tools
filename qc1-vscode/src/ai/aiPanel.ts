@@ -1,15 +1,68 @@
-import * as fs from "fs";
-import * as path from "path";
 import * as vscode from "vscode";
+import {
+  getLiixLocalApiType,
+  getLiixLocalApiUrl,
+  getLiixLocalModel,
+  getLiixProvider,
+  getLiixRuntimeConfig,
+  LiixAiClient,
+  LiixAvailableModel,
+  LiixLocalApiType,
+  LiixProvider,
+  setActiveLiixModel,
+  updateLiixRuntimeConfig
+} from "./aiClient";
 import { formatActiveFileContext, getActiveFileContext } from "./aiContext";
-import { LiixAiClient } from "./aiClient";
-import { liixAiModels } from "./aiModels";
-import { parseBuildLog, summarizeDiagnostics } from "./aiErrorParser";
+import { getAiModelLabel, liixAiModels } from "./aiModels";
+import {
+  createPermissionRequest,
+  detectAgentAction,
+  getWorkspaceRoot,
+  inspectRuntimeSnapshot,
+  LiixAgentAction,
+  LiixAgentMode,
+  LiixAgentResult,
+  LiixPermissionDecision,
+  LiixPermissionRequest,
+  requiresPermission,
+  runAgentAction
+} from "./aiAgent";
 
-type WebviewMessage = {
-  type: "sendMessage" | "readActiveFile" | "analyzeErrors";
-  modelId?: string;
-  message?: string;
+type LiixUiState =
+  | "idle"
+  | "queued"
+  | "analyzing"
+  | "reading_context"
+  | "running_tool"
+  | "streaming"
+  | "waiting_permission"
+  | "error"
+  | "done";
+
+type WebviewMessage =
+  | { type: "sendMessage"; requestId?: string; modelId?: string; message?: string; mode?: LiixAgentMode }
+  | { type: "runQuickAction"; requestId?: string; action: LiixAgentAction; mode?: LiixAgentMode }
+  | { type: "permissionDecision"; requestId: string; decision: LiixPermissionDecision }
+  | { type: "readActiveFile"; requestId?: string; modelId?: string }
+  | { type: "analyzeErrors"; requestId?: string; modelId?: string }
+  | { type: "copyApiKey" }
+  | { type: "refreshRuntime" }
+  | { type: "refreshModels" }
+  | { type: "selectModel"; modelId?: string }
+  | {
+      type: "settingsChanged";
+      provider?: LiixProvider;
+      localApiType?: LiixLocalApiType;
+      localApiUrl?: string;
+      localModel?: string;
+      defaultModel?: string;
+    };
+
+type PendingPermission = {
+  request: LiixPermissionRequest;
+  requestId?: string;
+  action: LiixAgentAction;
+  mode: LiixAgentMode;
 };
 
 export class LiixAiPanelProvider implements vscode.WebviewViewProvider {
@@ -17,6 +70,9 @@ export class LiixAiPanelProvider implements vscode.WebviewViewProvider {
 
   private view?: vscode.WebviewView;
   private readonly client = new LiixAiClient();
+  private readonly pendingPermissions = new Map<string, PendingPermission>();
+  private readonly sessionAllowed = new Set<string>();
+  private readonly alwaysAllowed = new Set<string>();
 
   constructor(private readonly extensionUri: vscode.Uri) {}
 
@@ -29,6 +85,7 @@ export class LiixAiPanelProvider implements vscode.WebviewViewProvider {
     };
 
     webviewView.webview.html = this.getHtml();
+    this.postRuntimeState();
 
     webviewView.webview.onDidReceiveMessage(async (message: WebviewMessage) => {
       try {
@@ -36,416 +93,703 @@ export class LiixAiPanelProvider implements vscode.WebviewViewProvider {
           case "sendMessage":
             await this.handleSendMessage(message);
             break;
+          case "runQuickAction":
+            await this.handleAgentAction(message.action, message.mode || "agent", message.requestId);
+            break;
+          case "permissionDecision":
+            await this.handlePermissionDecision(message.requestId, message.decision);
+            break;
           case "readActiveFile":
-            await this.handleReadActiveFile(message.modelId);
+            await this.handleReadActiveFile(message.modelId, message.requestId);
             break;
           case "analyzeErrors":
-            await this.handleAnalyzeErrors(message.modelId);
+            await this.handleAgentAction({ kind: "errors" }, "agent", message.requestId);
+            break;
+          case "copyApiKey":
+            await vscode.env.clipboard.writeText(this.getMaskedApiKey());
+            this.postToast("API key masquée copiée.");
+            break;
+          case "refreshRuntime":
+            await this.postRuntimeState();
+            break;
+          case "refreshModels":
+            await this.postRuntimeState(true);
+            break;
+          case "selectModel":
+            if (message.modelId) {
+              await setActiveLiixModel(message.modelId);
+              await this.postRuntimeState();
+            }
+            break;
+          case "settingsChanged":
+            await updateLiixRuntimeConfig({
+              provider: message.provider,
+              localApiType: message.localApiType,
+              localApiUrl: message.localApiUrl,
+              localModel: message.localModel,
+              defaultModel: message.defaultModel
+            });
+            await this.postRuntimeState(true);
             break;
         }
       } catch (error) {
         console.error("Liix AI webview error", error);
-        this.postErrorMessage();
+        this.postErrorMessage(error);
       }
     });
   }
 
-  private async handleSendMessage(message: WebviewMessage) {
+  private async handleSendMessage(message: Extract<WebviewMessage, { type: "sendMessage" }>) {
     const text = (message.message || "").trim();
+    const mode = message.mode || "chat";
+    const requestId = message.requestId;
 
     if (!text) {
-      this.postAssistantMessage("Ecris un message avant d'envoyer.");
+      this.postAssistantMessage("Écris un message avant d'envoyer.", requestId);
       return;
     }
 
-    await waitForMockResponse();
+    this.postUserMessage(text, requestId);
+    this.postAgentStatus("analyzing", "Analyse de la demande...", requestId);
 
+    const action = detectAgentAction(text);
+    let toolContext = "";
+
+    if (action && mode !== "chat") {
+      this.postAgentStatus("running_tool", "Exécution de la commande...", requestId);
+      const result = await this.prepareOrRunAction(action, mode, requestId);
+
+      if (!result) {
+        return;
+      }
+
+      toolContext = [
+        `Résultat outil: ${result.title}`,
+        result.summary,
+        result.details
+      ].join("\n");
+    }
+
+    this.postAgentStatus("reading_context", "Lecture du contexte workspace...", requestId);
+    const activeFile = getActiveFileContext();
     const response = await this.client.sendMessage({
       modelId: message.modelId || liixAiModels[0].id,
-      message: text,
-      mode: "chat"
+      message: buildPrompt(text, mode, toolContext),
+      context: activeFile ? formatActiveFileContext(activeFile) : toolContext,
+      contextMode: mode,
+      permissions: mode === "chat"
+        ? { fileWrite: "none", terminal: "none" }
+        : mode === "agent"
+          ? { fileWrite: "ask", terminal: "build" }
+          : { fileWrite: "auto", terminal: "ask" },
+      workspace: getWorkspaceRoot(),
+      activeFile: activeFile?.fileName
     });
 
-    this.postAssistantMessage(response.content);
+    this.postAgentStatus("streaming", "Réponse en cours...", requestId);
+    this.postAssistantMessage(response.content || "Aucune réponse reçue.", requestId);
+    this.postUsage(text, response.content, message.modelId || liixAiModels[0].id);
   }
 
-  private async handleReadActiveFile(modelId?: string) {
+  private async handleReadActiveFile(modelId?: string, requestId?: string) {
+    this.postAgentStatus("reading_context", "Lecture du contexte workspace...", requestId);
     const activeFile = getActiveFileContext();
 
     if (!activeFile) {
-      this.postAssistantMessage("Aucun fichier actif ouvert dans VSCode.");
+      this.postAssistantMessage("Aucun fichier actif ouvert dans VS Code.", requestId);
       return;
     }
 
-    const context = formatActiveFileContext(activeFile);
-    await waitForMockResponse();
-
     const response = await this.client.sendMessage({
       modelId: modelId || liixAiModels[0].id,
-      message: `Lecture du fichier actif: ${activeFile.fileName}`,
-      context,
-      mode: "file"
+      message: `Lis et résume le fichier actif ${activeFile.fileName}.`,
+      context: formatActiveFileContext(activeFile),
+      contextMode: "file",
+      mode: "file",
+      workspace: getWorkspaceRoot(),
+      activeFile: activeFile.fileName
     });
 
-    this.postAssistantMessage(
-      `Fichier actif lu.\n\n` +
-      `Nom: ${activeFile.fileName}\n` +
-      `Langage: ${activeFile.languageId}\n` +
-      `Lignes: ${activeFile.lineCount}\n` +
-      `${activeFile.truncated ? "Contenu tronque pour le mode dev.\n\n" : "\n"}` +
+    this.postAgentStatus("streaming", "Réponse en cours...", requestId);
+    this.postAssistantMessage([
+      `Fichier actif lu: ${activeFile.fileName}`,
+      `Langage: ${activeFile.languageId}`,
+      `Lignes: ${activeFile.lineCount}`,
+      "",
       response.content
-    );
+    ].join("\n"), requestId);
   }
 
-  private async handleAnalyzeErrors(modelId?: string) {
-    const activeUri = vscode.window.activeTextEditor?.document.uri;
-    const buildLogSummary = await this.readBuildLogSummary();
-    const diagnosticSummary = summarizeDiagnostics(activeUri);
-    const summary = buildLogSummary
-      ? {
-          errors: buildLogSummary.errors + diagnosticSummary.errors,
-          warnings: buildLogSummary.warnings + diagnosticSummary.warnings,
-          diagnostics: [
-            ...buildLogSummary.diagnostics,
-            ...diagnosticSummary.diagnostics
-          ].slice(0, 30),
-          source: `${buildLogSummary.source} + diagnostics ${diagnosticSummary.source}`
-        }
-      : diagnosticSummary;
-    const details = summary.diagnostics.length > 0
-      ? summary.diagnostics.join("\n")
-      : "Aucun diagnostic trouve pour le moment.";
+  private async handleAgentAction(action: LiixAgentAction, mode: LiixAgentMode, requestId?: string) {
+    this.postAgentStatus("running_tool", "Exécution de la commande...", requestId);
+    const result = await this.prepareOrRunAction(action, mode, requestId);
 
-    await waitForMockResponse();
-
-    const response = await this.client.sendMessage({
-      modelId: modelId || liixAiModels[0].id,
-      message: `Analyser erreurs depuis ${summary.source}: ${summary.errors} erreur(s), ${summary.warnings} warning(s).`,
-      context: details,
-      mode: "errors"
-    });
-
-    this.postAssistantMessage(
-      `Analyse erreurs (${summary.source}).\n\n` +
-      `Erreurs: ${summary.errors}\n` +
-      `Warnings: ${summary.warnings}\n\n` +
-      `${details}\n\n` +
-      response.content
-    );
+    if (result) {
+      this.postAgentStatus("streaming", "Réponse en cours...", requestId);
+      this.postAssistantMessage([
+        `${result.ok ? "Action terminée" : "Action échouée"}: ${result.title}`,
+        result.summary,
+        "",
+        result.details
+      ].join("\n"), requestId);
+    }
   }
 
-  private async readBuildLogSummary() {
-    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  private async prepareOrRunAction(action: LiixAgentAction, mode: LiixAgentMode, requestId?: string) {
+    const permissionKey = createPermissionKey(action);
 
-    if (!workspaceRoot) {
+    if (
+      requiresPermission(action, mode) &&
+      !this.sessionAllowed.has(permissionKey) &&
+      !this.alwaysAllowed.has(permissionKey)
+    ) {
+      const request = createPermissionRequest(action);
+      this.pendingPermissions.set(request.id, { request, requestId, action, mode });
+      this.postPermissionRequest(request, requestId);
+      this.postAgentStatus("waiting_permission", "Permission requise", requestId);
       return undefined;
     }
 
-    const logPath = path.join(workspaceRoot, ".qc1_last_build.log");
-
-    if (!fs.existsSync(logPath)) {
-      return undefined;
-    }
-
-    const log = await fs.promises.readFile(logPath, "utf8");
-    return parseBuildLog(log);
+    this.postTerminalEvent(`$ ${action.command || action.kind}${action.filePath ? ` ${action.filePath}` : ""}`, "command", requestId);
+    const result = await runAgentAction(action, mode);
+    this.postAgentResult(result, requestId);
+    return result;
   }
 
-  private postAssistantMessage(content: string) {
+  private async handlePermissionDecision(requestId: string, decision: LiixPermissionDecision) {
+    const pending = this.pendingPermissions.get(requestId);
+
+    if (!pending) {
+      return;
+    }
+
+    this.pendingPermissions.delete(requestId);
+
+    if (decision === "deny") {
+      this.postAssistantMessage("Action refusée.", pending.requestId);
+      this.postAgentStatus("error", "Permission refusée", pending.requestId);
+      return;
+    }
+
+    const key = createPermissionKey(pending.action);
+
+    if (decision === "allowSession") {
+      this.sessionAllowed.add(key);
+    }
+
+    if (decision === "alwaysAllow") {
+      this.alwaysAllowed.add(key);
+    }
+
+    this.postAgentStatus("running_tool", "Exécution de la commande...", pending.requestId);
+    this.postTerminalEvent(`$ ${pending.action.command || pending.action.kind}${pending.action.filePath ? ` ${pending.action.filePath}` : ""}`, "command", pending.requestId);
+    const result = await runAgentAction(pending.action, pending.mode);
+    this.postAgentResult(result, pending.requestId);
+    this.postAgentStatus("streaming", "Réponse en cours...", pending.requestId);
+    this.postAssistantMessage([
+      `${result.ok ? "Action autorisée et terminée" : "Action autorisée mais échouée"}: ${result.title}`,
+      result.summary,
+      "",
+      result.details
+    ].join("\n"), pending.requestId);
+  }
+
+  private async postRuntimeState(showModelChangeNotice = false) {
+    const currentProvider = getLiixProvider();
+    const beforeModel = currentProvider === "local" ? getLiixLocalModel() : vscode.workspace.getConfiguration().get<string>("liix.defaultModel", liixAiModels[0].id);
+    const runtimeConfig = await getLiixRuntimeConfig();
+    const provider = runtimeConfig.provider;
+    const localMode = provider === "local";
+    const snapshot = await inspectRuntimeSnapshot(provider, localMode);
+
     this.view?.webview.postMessage({
-      type: "assistantMessage",
-      content
+      type: "runtime",
+      runtime: {
+        ...snapshot,
+        apiKeyMasked: this.getMaskedApiKey(),
+        activeProvider: runtimeConfig.provider,
+        activeMode: runtimeConfig.mode,
+        activeEndpoint: runtimeConfig.endpoint,
+        activeModel: runtimeConfig.model,
+        localApiType: runtimeConfig.localApiType,
+        localApiUrl: getLiixLocalApiUrl(),
+        localModel: runtimeConfig.localModel,
+        models: runtimeConfig.models,
+        account: {
+          name: vscode.workspace.getConfiguration().get<string>("liix.userName", "Utilisateur Liix"),
+          email: vscode.workspace.getConfiguration().get<string>("liix.accountEmail", ""),
+          subscription: localMode ? "Local" : "Developer"
+        }
+      }
+    });
+
+    if (showModelChangeNotice && beforeModel !== runtimeConfig.model) {
+      this.view?.webview.postMessage({
+        type: "systemMessage",
+        content: "Modèle changé automatiquement pour correspondre au provider actif."
+      });
+    }
+  }
+
+  private postUserMessage(content: string, requestId?: string) {
+    this.view?.webview.postMessage({ type: "userMessage", requestId, content });
+  }
+
+  private postAssistantMessage(content: string, requestId?: string) {
+    this.view?.webview.postMessage({ type: "assistantMessage", requestId, content });
+  }
+
+  private postPermissionRequest(request: LiixPermissionRequest, requestId?: string) {
+    this.view?.webview.postMessage({ type: "permissionRequest", requestId, request });
+  }
+
+  private postTerminalEvent(content: string, stream: "stdout" | "stderr" | "command" = "command", requestId?: string) {
+    this.view?.webview.postMessage({ type: "terminalEvent", requestId, content, stream });
+  }
+
+  private postAgentResult(result: LiixAgentResult, requestId?: string) {
+    if (result.stdout || result.stderr) {
+      if (result.stdout) {
+        this.postTerminalEvent(result.stdout.trim() || "--", "stdout", requestId);
+      }
+
+      if (result.stderr) {
+        this.postTerminalEvent(result.stderr.trim() || "--", "stderr", requestId);
+      }
+
+      return;
+    }
+
+    this.postTerminalEvent(formatAgentResult(result), result.ok ? "stdout" : "stderr", requestId);
+  }
+
+  private postUsage(prompt: string, response: string, modelId: string) {
+    const promptTokens = estimateTokens(prompt);
+    const responseTokens = estimateTokens(response);
+    const provider = getLiixProvider();
+
+    this.view?.webview.postMessage({
+      type: "usage",
+      usage: {
+        model: getRuntimeModelLabel(modelId),
+        provider,
+        local: provider === "local",
+        promptTokens,
+        responseTokens,
+        totalTokens: promptTokens + responseTokens,
+        cost: provider === "local" ? "Unlimited local usage" : "Usage API",
+        latency: `${Math.max(0.2, responseTokens / 45).toFixed(1)}s`
+      }
     });
   }
 
-  private postErrorMessage() {
+  private postAgentStatus(state: LiixUiState, label: string, requestId?: string) {
+    this.view?.webview.postMessage({ type: "agentStatus", requestId, state, label });
+  }
+
+  private postToast(content: string) {
+    this.view?.webview.postMessage({ type: "toast", content });
+  }
+
+  private postErrorMessage(error: unknown) {
+    const detail = error instanceof Error ? error.message : String(error);
     this.view?.webview.postMessage({
       type: "errorMessage",
-      content: "Liix a rencontre un souci. Reessaie ou verifie la console de developpement."
+      content: `Liix a rencontré un souci. ${detail}`
     });
+    this.postAgentStatus("error", "Erreur");
+  }
+
+  private getMaskedApiKey(): string {
+    const apiKey = vscode.workspace.getConfiguration().get<string>("liix.apiKey", "");
+
+    if (!apiKey) {
+      return "sk-****-****-none";
+    }
+
+    return `${apiKey.slice(0, 3)}-****-****-${apiKey.slice(-4)}`;
   }
 
   private getHtml(): string {
-    const modelDisplayLabels = liixAiModels.reduce<Record<string, string>>((labels, model) => {
-      labels[model.id] = `${model.label} - Training`;
-      return labels;
-    }, {});
-    const modelDescriptions = liixAiModels.reduce<Record<string, string>>((descriptions, model) => {
-      descriptions[model.id] = model.description;
-      return descriptions;
-    }, {});
-    const modelCompactLabels: Record<string, string> = {
-      "liix-code-0-1": "Liix 0.1",
-      "liix-code-0-1-mini": "Mini",
-      "liix-code-a1": "A1"
-    };
     const modelOptions = liixAiModels.map((model) => (
-      `<option value="${escapeHtml(model.id)}" title="${escapeHtml(`${model.label} - Training - ${model.description}`)}">${escapeHtml(modelCompactLabels[model.id] || `${model.label} - Training`)}</option>`
+      `<option value="${escapeHtml(model.id)}">${escapeHtml(model.label)}</option>`
     )).join("");
+    const defaultProvider = getLiixProvider();
+    const defaultModel = liixAiModels[0]?.id || "liix-code-0.1";
+    const workspace = getWorkspaceRoot() || "--";
 
     return `<!DOCTYPE html>
 <html lang="fr">
 <head>
   <meta charset="UTF-8" />
-  <meta
-    http-equiv="Content-Security-Policy"
-    content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';"
-  />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <style>
     :root {
       --bg: var(--vscode-editor-background);
       --panel: color-mix(in srgb, var(--vscode-sideBar-background) 88%, #020407);
       --panel-2: color-mix(in srgb, var(--vscode-sideBar-background) 94%, var(--vscode-editor-background));
-      --border: color-mix(in srgb, var(--vscode-panel-border) 70%, transparent);
-      --muted: var(--vscode-descriptionForeground);
+      --sidebar: color-mix(in srgb, var(--vscode-sideBar-background) 94%, #08090c);
+      --surface: color-mix(in srgb, var(--vscode-editor-background) 82%, #121318);
+      --surface-2: color-mix(in srgb, var(--vscode-sideBar-background) 88%, #15161c);
+      --surface-3: color-mix(in srgb, var(--vscode-input-background) 88%, #101116);
+      --border: color-mix(in srgb, var(--vscode-panel-border) 62%, transparent);
+      --border-soft: color-mix(in srgb, var(--vscode-panel-border) 34%, transparent);
       --fg: var(--vscode-editor-foreground);
+      --muted: var(--vscode-descriptionForeground);
+      --faint: color-mix(in srgb, var(--vscode-descriptionForeground) 72%, transparent);
       --blue: var(--vscode-button-background);
       --blue-hover: var(--vscode-button-hoverBackground);
       --red: #ff4f63;
       --red-soft: rgba(255, 79, 99, 0.16);
       --shadow: 0 8px 20px rgba(0, 0, 0, 0.22);
+     --accent: #ff3b4d;
+--accent-2: #ff4f63;
+--accent-soft: color-mix(in srgb, #ff3b4d 14%, transparent);
+
+--chat: #9aa0a6;
+
+--full: #ff4458;
+
+--danger: #ff5c74;
+--warning: #e5b95c;
+--ok: #58d68d;
+
+--code: #07080c;
     }
 
     * { box-sizing: border-box; }
-
-    html, body {
-      width: 100%;
-      height: 100%;
-      overflow: hidden;
-    }
-
+    html, body { height: 100%; overflow: hidden; }
     body {
       margin: 0;
       padding: 0;
-      font-family: var(--vscode-font-family);
       color: var(--fg);
+      background:
+        radial-gradient(circle at 0% 0%, color-mix(in srgb, var(--blue) 12%, transparent), transparent 30%),
+        linear-gradient(180deg, color-mix(in srgb, var(--bg) 92%, #03060a) 0%, var(--bg) 100%);
+      font-family: var(--vscode-font-family);
+      font-size: 12px;
+      letter-spacing: 0;
+    }
+
+    button, select, input, textarea {
+      font: inherit;
+      color: var(--fg);
+      background: var(--surface-3);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      outline: none;
+    }
+
+    button {
+      min-height: 28px;
+      padding: 4px 9px;
+      cursor: pointer;
+    }
+
+    button:hover, select:hover, input:hover, textarea:hover {
+      border-color: color-mix(in srgb, var(--muted) 42%, var(--border));
+    }
+
+    button.primary {
+      background: color-mix(in srgb, var(--accent) 74%, #11131a);
+      border-color: transparent;
+      color: #fff;
+    }
+
+    button.ghost {
+      background: transparent;
+    }
+
+    button.danger {
+      color: var(--danger);
+      border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+      background: color-mix(in srgb, var(--danger) 10%, transparent);
+    }
+
+    select, input {
+      height: 28px;
+      padding: 3px 8px;
+      min-width: 0;
+    }
+
+    textarea {
+      width: 100%;
+      min-height: 56px;
+      max-height: 150px;
+      resize: vertical;
+      padding: 8px 9px;
+      line-height: 1.42;
+    }
+
+    .app {
+      height: 100vh;
+      display: grid;
+      grid-template-columns: 52px minmax(0, 1fr);
+      min-width: 0;
       background:
         radial-gradient(circle at 0% 0%, color-mix(in srgb, var(--blue) 12%, transparent), transparent 30%),
         linear-gradient(180deg, color-mix(in srgb, var(--bg) 92%, #03060a) 0%, var(--bg) 100%);
     }
 
-    .ai-root {
-      height: 100vh;
+    .rail {
       display: flex;
       flex-direction: column;
-      overflow: hidden;
-      min-width: 0;
-    }
-
-    .ai-header {
-      flex: 0 0 auto;
-      min-width: 0;
-      padding: 10px 10px 8px;
-      border-bottom: 1px solid var(--border);
-      background: color-mix(in srgb, var(--panel) 94%, #020407);
-    }
-
-    .header-row {
-      display: flex;
       align-items: center;
-      justify-content: space-between;
+      gap: 6px;
+      padding: 8px 6px;
+      border-right: 1px solid var(--border);
+      background: var(--sidebar);
+    }
+
+    .mark {
+      width: 30px;
+      height: 30px;
+      display: grid;
+      place-items: center;
+      border-radius: 8px;
+      color: #fff;
+      background: linear-gradient(145deg, var(--accent-2), var(--accent));
+      box-shadow: 0 0 18px color-mix(in srgb, var(--accent) 22%, transparent);
+      font-weight: 800;
+      margin-bottom: 5px;
+    }
+
+    .nav-btn {
+      width: 36px;
+      height: 34px;
+      display: grid;
+      place-items: center;
+      padding: 0;
+      border-color: transparent;
+      background: transparent;
+      color: var(--muted);
+      position: relative;
+    }
+
+    .nav-btn.active {
+      color: var(--fg);
+      background: color-mix(in srgb, var(--fg) 8%, transparent);
+      border-color: var(--border-soft);
+    }
+
+    .nav-btn.active::before {
+      content: "";
+      position: absolute;
+      left: -6px;
+      width: 2px;
+      height: 18px;
+      border-radius: 99px;
+      background: var(--accent);
+    }
+
+    .nav-icon { font-size: 14px; line-height: 1; }
+    .shell { min-width: 0; height: 100vh; display: grid; grid-template-rows: auto 1fr auto; }
+    .topbar {
+      border-bottom: 1px solid var(--border);
+      background: color-mix(in srgb, var(--surface) 96%, transparent);
+    }
+
+    .topbar-inner {
+      width: min(100%, 960px);
+      margin: 0 auto;
+      min-height: 46px;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 10px;
+      padding: 6px 12px;
+    }
+
+    .title-row { display: flex; align-items: center; gap: 7px; min-width: 0; }
+    .title { font-weight: 700; font-size: 13px; white-space: nowrap; }
+    .meta-row {
+      display: flex;
+      gap: 7px;
+      align-items: center;
+      min-width: 0;
+      color: var(--muted);
+      font-size: 11px;
+      margin-top: 2px;
+      white-space: nowrap;
+      overflow: hidden;
+    }
+
+    .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .header-controls { display: flex; gap: 6px; align-items: center; min-width: 0; }
+    .model-select { width: 170px; max-width: 34vw; }
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 99px;
+      display: inline-block;
+      background: var(--ok);
+      box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 40%, transparent);
+    }
+
+    .status-dot.active {
+      animation: pulse 1.4s ease-in-out infinite;
+      background: var(--warning);
+    }
+
+    .status-dot.waiting_permission, .status-dot.error {
+      background: var(--danger);
+    }
+
+    .main {
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    .page {
+      display: none;
+      height: 100%;
+      overflow: auto;
+      width: min(100%, 960px);
+      margin: 0 auto;
+      padding: 10px 12px;
+    }
+
+    .page.active { display: block; }
+    .chat-page.active {
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr) auto;
       gap: 8px;
-      min-width: 0;
+      overflow: hidden;
     }
 
-    .title-wrap {
-      min-width: 0;
+    .compact-strip {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 8px;
     }
 
-    .title {
+    .mode-pills { display: flex; gap: 5px; min-width: 0; }
+    .mode-pill {
+      min-height: 24px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      color: var(--muted);
+      background: transparent;
+    }
+
+    .mode-pill[data-mode="chat"].active {
+      color: var(--fg);
+      border-color: color-mix(in srgb, var(--chat) 52%, var(--border));
+      background: color-mix(in srgb, var(--chat) 13%, transparent);
+    }
+
+    .mode-pill[data-mode="agent"].active {
+      color: #ffd6c7;
+      border-color: color-mix(in srgb, var(--accent) 58%, var(--border));
+      background: var(--accent-soft);
+    }
+
+    .mode-pill[data-mode="full"].active {
+      color: #ffd8c2;
+      border-color: color-mix(in srgb, var(--full) 62%, var(--border));
+      background: color-mix(in srgb, var(--full) 15%, transparent);
+    }
+
+    .runtime-card {
       display: flex;
       align-items: center;
       gap: 7px;
-      min-width: 0;
-      font-size: 15px;
-      font-weight: 900;
-      letter-spacing: 0;
-    }
-
-    .liix-dot {
-      width: 8px;
-      height: 8px;
-      flex: 0 0 auto;
-      border-radius: 999px;
-      background: var(--red);
-      box-shadow: 0 0 10px rgba(255, 79, 99, 0.65);
-    }
-
-    .status-line {
-      margin-top: 2px;
       color: var(--muted);
       font-size: 11px;
-      line-height: 1.3;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-
-    .ai-badge {
-      flex: 0 0 auto;
-      padding: 2px 7px;
-      border: 1px solid color-mix(in srgb, var(--red) 42%, var(--border));
-      border-radius: 999px;
-      background: var(--red-soft);
-      color: #ff9aa5;
-      font-size: 10px;
-      font-weight: 900;
-      text-transform: uppercase;
-    }
-
-    .model-strip {
-      display: none;
-    }
-
-    select, textarea {
-      width: 100%;
       min-width: 0;
-      border: 1px solid var(--vscode-input-border, var(--border));
-      border-radius: 7px;
-      color: var(--vscode-input-foreground);
-      background: color-mix(in srgb, var(--vscode-input-background) 88%, #020407);
-      font-family: var(--vscode-font-family);
     }
 
-    select {
-      height: 30px;
-      padding: 4px 8px;
-      font-size: 12px;
-      font-weight: 700;
+    .messages {
+      overflow: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+      padding: 1px 2px 4px 0;
+      min-height: 0;
     }
 
-    .model-meta {
-      min-width: 0;
-      padding: 6px 8px;
-      border: 1px solid var(--border);
-      border-radius: 7px;
-      background: color-mix(in srgb, var(--panel-2) 90%, #020407);
+    .msg {
+      border: 1px solid var(--border-soft);
+      border-radius: 8px;
+      background: color-mix(in srgb, var(--surface-2) 86%, transparent);
+      padding: 7px 9px;
+      line-height: 1.43;
+      word-break: break-word;
+      animation: fadeIn 150ms ease-out;
+      transition: border-color 160ms ease, background 160ms ease, opacity 160ms ease;
+    }
+
+    .msg.user {
+      align-self: flex-end;
+      max-width: 88%;
+      background: color-mix(in srgb, var(--fg) 7%, var(--surface-2));
+      border-color: color-mix(in srgb, var(--fg) 11%, var(--border-soft));
+    }
+
+    .msg.assistant {
+      max-width: 94%;
+    }
+
+    .msg.system {
+      color: var(--muted);
+      background: color-mix(in srgb, var(--accent) 7%, var(--surface));
+      border-style: dashed;
+    }
+
+    .msg.error {
+      color: color-mix(in srgb, var(--danger) 88%, var(--fg));
+      border-color: color-mix(in srgb, var(--danger) 48%, var(--border));
+      background: color-mix(in srgb, var(--danger) 9%, var(--surface));
+    }
+
+    .msg.permission {
+      border-color: color-mix(in srgb, var(--warning) 54%, var(--border));
+      background: color-mix(in srgb, var(--warning) 9%, var(--surface));
+    }
+
+    .msg p { margin: 0 0 7px; }
+    .msg p:last-child { margin-bottom: 0; }
+    .msg code {
+      font-family: var(--vscode-editor-font-family);
       font-size: 11px;
-      line-height: 1.35;
+      background: color-mix(in srgb, var(--fg) 8%, transparent);
+      border: 1px solid var(--border-soft);
+      border-radius: 4px;
+      padding: 1px 4px;
     }
 
-    .model-meta-top {
+    .code-block {
+      margin: 7px 0;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+      background: var(--code);
+    }
+
+    .code-lang {
+      height: 24px;
       display: flex;
       align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-      min-width: 0;
-    }
-
-    .model-name {
-      min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      font-weight: 800;
-    }
-
-    .model-status {
-      flex: 0 0 auto;
-      padding: 1px 6px;
-      border-radius: 999px;
-      background: var(--red-soft);
-      color: #ff9aa5;
-      font-size: 10px;
-      font-weight: 900;
-    }
-
-    .model-desc {
-      margin-top: 3px;
+      padding: 0 8px;
       color: var(--muted);
-      overflow-wrap: anywhere;
+      border-bottom: 1px solid var(--border-soft);
+      font-size: 10px;
     }
 
-    .quick-actions {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 6px;
-      margin-top: 8px;
+    pre {
+      margin: 0;
+      padding: 8px;
+      overflow: auto;
+      white-space: pre;
+      font-family: var(--vscode-editor-font-family);
+      font-size: 11px;
+      line-height: 1.45;
     }
 
-    button {
-      border: 1px solid var(--vscode-button-border, transparent);
-      border-radius: 7px;
-      padding: 6px 9px;
-      color: var(--vscode-button-foreground);
-      background: var(--blue);
-      cursor: pointer;
-      font-size: 12px;
-      font-weight: 800;
-      transition: transform 0.16s ease, background 0.16s ease, box-shadow 0.16s ease, opacity 0.16s ease;
-    }
-
-    button:hover:not(:disabled) {
-      background: linear-gradient(135deg, var(--blue-hover), color-mix(in srgb, var(--blue-hover) 86%, var(--red)));
-      box-shadow: 0 5px 14px rgba(0, 0, 0, 0.22);
-      transform: translateY(-1px);
-    }
-
-    button:disabled {
-      cursor: not-allowed;
-      opacity: 0.62;
-      transform: none;
-      box-shadow: none;
-    }
-
-    .secondary {
-      color: var(--vscode-button-secondaryForeground);
-      background: var(--vscode-button-secondaryBackground);
-    }
-
-    .ai-messages {
-      flex: 1 1 auto;
-      min-height: 0;
-      overflow-y: auto;
-      overflow-x: hidden;
-      padding: 8px 9px;
-      background: color-mix(in srgb, var(--bg) 92%, #020407);
-      white-space: pre-wrap;
-    }
-
-    .message {
-      max-width: 96%;
-      margin-bottom: 7px;
-      padding: 8px 9px;
-      border: 1px solid color-mix(in srgb, var(--border) 76%, transparent);
-      border-radius: 11px;
-      background: var(--panel-2);
-      line-height: 1.4;
-      font-size: 12px;
-      overflow-wrap: anywhere;
-      animation: fadeIn 0.2s ease both;
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.14);
-    }
-
-    .message.user {
-      margin-left: auto;
-      border-color: color-mix(in srgb, var(--blue) 34%, var(--border));
-      background: color-mix(in srgb, var(--blue) 16%, var(--panel-2));
-    }
-
-    .message.assistant {
-      margin-right: auto;
-      border-color: color-mix(in srgb, var(--red) 18%, var(--border));
-      background:
-        linear-gradient(135deg, color-mix(in srgb, var(--panel-2) 94%, var(--blue)), color-mix(in srgb, var(--panel-2) 96%, var(--red)));
-      box-shadow:
-        0 5px 14px rgba(0, 0, 0, 0.14),
-        0 0 0 1px color-mix(in srgb, var(--blue) 7%, transparent),
-        0 0 18px rgba(255, 79, 99, 0.045);
-    }
-
-    .message.system {
-      max-width: 100%;
-      margin: 0 0 7px;
-      padding: 7px 9px;
-      border-color: color-mix(in srgb, var(--blue) 18%, var(--border));
-      background: color-mix(in srgb, var(--panel-2) 88%, #020407);
-      color: color-mix(in srgb, var(--fg) 78%, var(--muted));
-      box-shadow: none;
-    }
-
-    .message.loading {
+    .msg.loading-message {
       display: flex;
       align-items: center;
       gap: 8px;
@@ -454,37 +798,10 @@ export class LiixAiPanelProvider implements vscode.WebviewViewProvider {
       transition: opacity 0.16s ease, transform 0.16s ease;
     }
 
-    .message.error {
-      margin-right: auto;
-      border-color: rgba(255, 79, 99, 0.62);
-      background: rgba(255, 79, 99, 0.10);
-      color: #ffb5bd;
-    }
-
-    .role {
-      display: block;
-      margin-bottom: 3px;
-      color: var(--muted);
-      font-size: 9px;
-      font-weight: 900;
-      text-transform: uppercase;
-    }
-
-    .message.system .role {
-      display: inline;
-      margin: 0 6px 0 0;
-      color: color-mix(in srgb, var(--blue) 72%, var(--muted));
-    }
-
-    .typing-caret::after {
-      content: "";
-      display: inline-block;
-      width: 7px;
-      height: 1em;
-      margin-left: 2px;
-      border-right: 2px solid var(--red);
-      vertical-align: -2px;
-      animation: blink 0.8s steps(1) infinite;
+    .loading {
+      display: flex;
+      align-items: center;
+      gap: 8px;
     }
 
     .ai-ring {
@@ -516,252 +833,258 @@ export class LiixAiPanelProvider implements vscode.WebviewViewProvider {
       transition: opacity 0.12s ease;
     }
 
-    .loading-subtitle {
-      color: var(--muted);
-      font-size: 11px;
-      transition: opacity 0.12s ease;
-    }
-
-    .thinking-dots .content::after {
-      content: ".";
+    .loading-title::after {
+      content: "";
       animation: dots 1.2s steps(3, end) infinite;
     }
 
-    .ai-composer {
-      flex: 0 0 auto;
-      position: sticky;
-      bottom: 0;
-      padding: 8px 10px 10px;
-      border-top: 1px solid var(--border);
-      background: color-mix(in srgb, var(--panel) 94%, #020407);
+    .loading-subtitle {
+      color: var(--muted);
+      font-size: 11px;
+      opacity: 1;
+      transition: opacity 0.12s ease;
     }
 
-    .composer-box {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr);
+    .loading-subtitle.fade {
+      opacity: 0;
+    }
+
+    .step-list {
+      display: flex;
+      flex-wrap: wrap;
       gap: 4px;
-      min-width: 0;
+      margin-top: 7px;
     }
 
-    .control-bar {
-      display: grid;
-      grid-template-columns: minmax(42px, 0.82fr) minmax(48px, 1fr) minmax(38px, 0.72fr) 38px 42px 32px;
-      align-items: center;
-      gap: 4px;
-      min-width: 0;
-      margin-top: 6px;
-      overflow: visible;
-    }
-
-    .control-item {
-      min-width: 0;
-      width: 100%;
-      height: 26px;
-      border: 1px solid var(--border);
-      border-radius: 7px;
-      background: color-mix(in srgb, var(--panel-2) 90%, #020407);
-      color: var(--fg);
+    .step {
+      border: 1px solid var(--border-soft);
+      border-radius: 999px;
+      padding: 2px 6px;
+      color: var(--muted);
       font-size: 10px;
-      font-weight: 800;
     }
 
-    .control-select {
-      max-width: none;
-      padding: 2px 4px;
-      text-overflow: ellipsis;
+    .step.active {
+      color: #ffd6c7;
+      border-color: color-mix(in srgb, var(--accent) 48%, var(--border));
+      background: var(--accent-soft);
     }
 
-    .context-select {
-      max-width: none;
+    .step.done {
+      color: var(--ok);
     }
 
-    .permissions-menu {
-      position: relative;
-      max-width: none;
-      overflow: visible;
+    .typing-caret::after {
+      content: "";
+      display: inline-block;
+      width: 7px;
+      height: 1em;
+      margin-left: 2px;
+      border-right: 2px solid var(--red);
+      vertical-align: -2px;
+      animation: blink 0.8s steps(1) infinite;
     }
 
-    .permissions-menu summary {
-      height: 24px;
-      padding: 5px 6px;
-      cursor: pointer;
-      list-style: none;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
+    .skeleton-line {
+      height: 8px;
+      border-radius: 999px;
+      background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 7%, transparent), color-mix(in srgb, var(--accent) 18%, transparent), color-mix(in srgb, var(--accent-2) 8%, transparent));
+      background-size: 220% 100%;
+      animation: shimmer 1.4s ease-in-out infinite;
+      margin-top: 6px;
     }
 
-    .permissions-menu summary::-webkit-details-marker {
-      display: none;
-    }
-
-    .permissions-menu[open] summary {
-      color: var(--vscode-button-foreground);
-      background: color-mix(in srgb, var(--blue) 28%, transparent);
-      border-radius: 6px;
-    }
-
-    .permissions-popover {
-      position: absolute;
-      right: 0;
-      bottom: 32px;
-      z-index: 10;
-      width: min(240px, 78vw);
+    .composer {
+      display: grid;
+      gap: 7px;
       padding: 8px;
       border: 1px solid var(--border);
       border-radius: 8px;
-      background: color-mix(in srgb, var(--panel) 96%, #020407);
-      box-shadow: var(--shadow);
+      background: color-mix(in srgb, var(--surface-2) 92%, transparent);
     }
 
-    .permission-row {
-      display: flex;
+    .composer-actions {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto auto auto;
       align-items: center;
-      gap: 7px;
-      padding: 5px 3px;
-      color: var(--fg);
+      gap: 6px;
+    }
+
+    .queue-mini {
+      min-width: 0;
+      color: var(--muted);
       font-size: 11px;
-      font-weight: 700;
-    }
-
-    .permission-row input {
-      accent-color: var(--blue);
-    }
-
-    .usage-chip {
-      width: 100%;
-      padding: 4px 5px;
-    }
-
-    .usage-top {
-      display: flex;
-      justify-content: center;
-      gap: 4px;
-      line-height: 1;
-    }
-
-    .usage-count {
-      display: none;
-      color: var(--muted);
-      font-weight: 700;
-    }
-
-    .usage-bar {
-      height: 3px;
-      margin-top: 4px;
-      border-radius: 999px;
-      background: rgba(127, 127, 127, 0.22);
-      overflow: hidden;
-    }
-
-    .usage-fill {
-      width: 0%;
-      height: 100%;
-      border-radius: 999px;
-      background: var(--blue);
-      transition: width 0.2s ease, background 0.2s ease;
-    }
-
-    .usage-chip.warn .usage-fill {
-      background: var(--red);
-    }
-
-    .usage-chip.limit {
-      border-color: rgba(255, 79, 99, 0.72);
-      color: #ffb5bd;
-    }
-
-    .usage-chip.limit .usage-fill {
-      background: #ff243e;
-    }
-
-    .server-badge {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      max-width: none;
-      padding: 0 5px;
-      white-space: nowrap;
-      color: #9dd8ff;
-    }
-
-    .server-badge::before {
-      content: "";
-      width: 6px;
-      height: 6px;
-      margin-right: 4px;
-      border-radius: 999px;
-      background: var(--blue);
-      box-shadow: 0 0 8px color-mix(in srgb, var(--blue) 62%, transparent);
-    }
-
-    .server-badge.offline,
-    .server-badge.training {
-      color: #ff9aa5;
-      border-color: color-mix(in srgb, var(--red) 45%, var(--border));
-    }
-
-    .server-badge.offline::before,
-    .server-badge.training::before {
-      background: var(--red);
-      box-shadow: 0 0 8px rgba(255, 79, 99, 0.6);
-    }
-
-    textarea {
-      min-height: 34px;
-      max-height: 74px;
-      padding: 7px 8px;
-      resize: vertical;
-      line-height: 1.35;
-      font-size: 12px;
-    }
-
-    .send-button {
-      width: 32px;
-      height: 26px;
-      min-width: 32px;
-      padding: 0;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      flex: 0 0 auto;
-    }
-
-    .send-arrow {
-      font-size: 14px;
-      line-height: 1;
-    }
-
-    .button-spinner {
-      display: none;
-      width: 13px;
-      height: 13px;
-      border-radius: 50%;
-      border: 2px solid rgba(255, 255, 255, 0.36);
-      border-top-color: var(--vscode-button-foreground);
-      animation: spin 0.8s linear infinite;
-    }
-
-    .send-button.loading .button-spinner {
-      display: inline-block;
-    }
-
-    .send-button.loading .send-arrow {
-      display: none;
-    }
-
-    .composer-hint {
-      margin-top: 3px;
-      color: var(--muted);
-      font-size: 9px;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
 
-    @keyframes fadeIn {
-      from { opacity: 0; transform: translateY(5px); }
-      to { opacity: 1; transform: translateY(0); }
+    .panel-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .card {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: color-mix(in srgb, var(--surface-2) 90%, transparent);
+      padding: 9px;
+      margin-bottom: 8px;
+    }
+
+    .card-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 7px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-height: 22px;
+      border-top: 1px solid var(--border-soft);
+      padding-top: 5px;
+      margin-top: 5px;
+    }
+
+    .row:first-of-type { border-top: 0; padding-top: 0; margin-top: 0; }
+    .label { color: var(--muted); font-size: 11px; }
+    .value { font-size: 11px; text-align: right; overflow-wrap: anywhere; }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 1px 6px;
+      color: var(--muted);
+      font-size: 10px;
+      min-height: 18px;
+    }
+    .badge.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, var(--border)); }
+    .badge.warn { color: var(--warning); border-color: color-mix(in srgb, var(--warning) 40%, var(--border)); }
+    .badge.high { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 44%, var(--border)); }
+
+    .action-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 6px;
+    }
+
+    .terminal {
+      height: 100%;
+      display: grid;
+      grid-template-rows: auto auto minmax(0, 1fr) auto;
+      gap: 8px;
+      min-height: 0;
+    }
+
+    .terminal-lanes {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 6px;
+    }
+
+    .lane {
+      border: 1px solid var(--border-soft);
+      border-radius: 8px;
+      padding: 7px;
+      background: color-mix(in srgb, var(--surface-2) 72%, transparent);
+      min-height: 52px;
+    }
+
+    .terminal-output {
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px;
+      background: var(--code);
+      font-family: var(--vscode-editor-font-family);
+      font-size: 11px;
+      line-height: 1.45;
+    }
+
+    .term-line {
+      white-space: pre-wrap;
+      word-break: break-word;
+      padding: 2px 0;
+      border-bottom: 1px solid color-mix(in srgb, var(--border-soft) 45%, transparent);
+    }
+
+    .stdout { color: var(--fg); }
+    .stderr { color: var(--danger); }
+    .command { color: #ffc2ad; }
+
+    .settings-layout {
+      display: grid;
+      grid-template-columns: 150px minmax(0, 1fr);
+      gap: 10px;
+      min-height: 0;
+    }
+
+    .settings-nav {
+      display: grid;
+      align-content: start;
+      gap: 4px;
+      position: sticky;
+      top: 0;
+    }
+
+    .settings-nav button {
+      text-align: left;
+      background: transparent;
+      border-color: transparent;
+      color: var(--muted);
+    }
+
+    .settings-nav button.active {
+      color: var(--fg);
+      background: color-mix(in srgb, var(--fg) 7%, transparent);
+      border-color: var(--border-soft);
+    }
+
+    .settings-section { display: none; }
+    .settings-section.active { display: block; }
+    .field { display: grid; gap: 4px; margin-top: 7px; }
+    .field input, .field select { width: 100%; }
+
+    .permission-actions {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 6px;
+      margin-top: 8px;
+    }
+
+    .toast {
+      display: none;
+      position: fixed;
+      left: 64px;
+      right: 12px;
+      bottom: 42px;
+      padding: 8px 10px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--surface-2);
+      box-shadow: 0 12px 40px color-mix(in srgb, #000 34%, transparent);
+      z-index: 4;
+    }
+
+    .footer {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+      border-top: 1px solid var(--border);
+      padding: 5px 12px;
+      color: var(--muted);
+      font-size: 10px;
+      min-height: 28px;
     }
 
     @keyframes spin {
@@ -778,256 +1101,488 @@ export class LiixAiPanelProvider implements vscode.WebviewViewProvider {
       33% { content: ".."; }
       66%, 100% { content: "..."; }
     }
-
-    @media (max-width: 420px) {
-      .ai-header { padding: 8px; }
-      .ai-messages { padding: 6px; }
-      .ai-composer { padding: 6px 7px 7px; }
-      .quick-actions button { flex: 1 1 auto; }
-      .message { max-width: 100%; margin-bottom: 6px; padding: 7px 8px; }
-      .control-bar {
-        grid-template-columns: minmax(38px, 0.82fr) minmax(42px, 0.92fr) 34px 34px 36px 30px;
-        gap: 3px;
-      }
-      .control-item { height: 24px; font-size: 9px; border-radius: 6px; }
-      .control-select { padding: 1px 2px; }
-      .permissions-menu summary { height: 22px; padding: 4px 5px; }
-      .server-badge { padding: 0 4px; }
-      .server-badge::before { margin-right: 3px; }
-      .send-button { width: 30px; height: 24px; min-width: 30px; }
-      textarea { min-height: 32px; max-height: 62px; padding: 6px 7px; }
+    @keyframes pulse {
+      0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--warning) 36%, transparent); }
+      50% { box-shadow: 0 0 0 5px transparent; }
+    }
+    @keyframes shimmer {
+      0% { background-position: 120% 0; }
+      100% { background-position: -120% 0; }
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(5px); }
+      to { opacity: 1; transform: translateY(0); }
     }
 
-    @media (max-width: 320px) {
-      .control-bar {
-        grid-template-columns: minmax(34px, 0.8fr) minmax(38px, 0.9fr) 30px 32px 30px 28px;
+    @media (max-width: 620px) {
+      .app { grid-template-columns: 44px minmax(0, 1fr); }
+      .rail { padding-inline: 4px; }
+      .nav-btn { width: 32px; }
+      .topbar-inner { grid-template-columns: minmax(0, 1fr); padding: 6px 8px; }
+      .header-controls { justify-content: space-between; }
+      .model-select { width: 100%; max-width: none; }
+      .page { padding: 8px; }
+      .compact-strip, .composer-actions, .settings-layout, .panel-grid, .terminal-lanes {
+        grid-template-columns: 1fr;
       }
-      .control-item { font-size: 8.5px; }
-      .server-badge span { display: none; }
-      .server-badge::before { margin-right: 0; }
+      .msg.user, .msg.assistant { max-width: 100%; }
+      .action-grid { grid-template-columns: 1fr; }
+      .toast { left: 52px; }
     }
   </style>
 </head>
 <body>
-  <div class="ai-root">
-    <header class="ai-header">
-      <div class="header-row">
-        <div class="title-wrap">
-          <div class="title"><span class="liix-dot"></span><span>Liix AI</span></div>
-          <div class="status-line">Mock/dev &middot; mod&egrave;les en entra&icirc;nement</div>
-        </div>
-        <span class="ai-badge">AI</span>
-      </div>
-      <div class="quick-actions">
-        <button class="secondary" onclick="readActiveFile()">Lire le fichier actif</button>
-        <button class="secondary" onclick="analyzeErrors()">Analyser erreurs</button>
-      </div>
-    </header>
+  <div class="app">
+    <aside class="rail" aria-label="Liix AI navigation">
+      <div class="mark">L</div>
+      <button class="nav-btn active" data-page="chat" title="Chat"><span class="nav-icon">C</span></button>
+      <button class="nav-btn" data-page="agent" title="Agent"><span class="nav-icon">A</span></button>
+      <button class="nav-btn" data-page="terminal" title="Terminal"><span class="nav-icon">&gt;</span></button>
+      <button class="nav-btn" data-page="settings" title="Settings"><span class="nav-icon">S</span></button>
+      <button class="nav-btn" data-page="account" title="Account"><span class="nav-icon">@</span></button>
+    </aside>
 
-    <main id="chat" class="ai-messages">
-      <div class="message system">
-        <span class="role">Systeme</span>
-        <span class="content">Mock/dev actif. Les reponses Liix sont simulees pendant l'entrainement des modeles.</span>
-      </div>
-    </main>
-
-    <footer class="ai-composer">
-      <div class="composer-box">
-        <textarea id="messageInput" placeholder="Message"></textarea>
-      </div>
-      <div class="control-bar">
-        <select id="contextSelect" class="control-item control-select context-select" aria-label="Mode contexte" title="Mode contexte">
-          <option value="question" title="Question - repond sans analyser le code">ctx</option>
-          <option value="active-file" title="Fichier actif - utilise seulement le fichier ouvert">file</option>
-          <option value="project" title="Projet - peut lire le workspace">proj</option>
-          <option value="errors" title="Erreurs - analyse les erreurs build/terminal">err</option>
-          <option value="agent" title="Agent - peut proposer des changements">agent</option>
-          <option value="autocomplete" title="Autocomplete - prevu pour suggestions inline plus tard">Auto</option>
-        </select>
-        <select id="modelSelect" class="control-item control-select" aria-label="Modele AI">${modelOptions}</select>
-        <details id="permissionsMenu" class="control-item permissions-menu">
-          <summary id="permissionsSummary">RO</summary>
-          <div class="permissions-popover">
-            <label class="permission-row"><input type="checkbox" value="read-only" checked /> Lecture seule</label>
-            <label class="permission-row"><input type="checkbox" value="ask-before-edit" /> Demander avant modification</label>
-            <label class="permission-row"><input type="checkbox" value="auto-apply" /> Auto apply</label>
-            <label class="permission-row"><input type="checkbox" value="terminal-forbidden" checked /> Terminal interdit</label>
-            <label class="permission-row"><input type="checkbox" value="terminal-approval" /> Terminal avec approbation</label>
-            <label class="permission-row"><input type="checkbox" value="build-allowed" /> Build autorise</label>
+    <div class="shell">
+      <header class="topbar">
+        <div class="topbar-inner">
+          <div>
+            <div class="title-row">
+              <span class="title">Liix AI</span>
+              <span class="badge">v0.2.x</span>
+              <span class="badge" id="connectionBadge">${escapeHtml(defaultProvider)}</span>
+            </div>
+            <div class="meta-row">
+              <span id="agentDot" class="status-dot"></span>
+              <span id="agentLabel">Prêt</span>
+              <span>·</span>
+              <span id="workspaceLabel" class="truncate">${escapeHtml(workspace)}</span>
+              <span>·</span>
+              <span id="runtimeMini">runtime: inspection</span>
+            </div>
           </div>
-        </details>
-        <div id="usageChip" class="control-item usage-chip" title="Usage tokens mock/dev">
-          <div class="usage-top"><span id="usagePercent">6%</span><span id="usageCount" class="usage-count">1 240 / 20 000</span></div>
-          <div class="usage-bar"><div id="usageFill" class="usage-fill"></div></div>
+          <div class="header-controls">
+            <select id="model" class="model-select" title="Modèle actif">${modelOptions}</select>
+            <button id="refreshRuntime" class="ghost" title="Rafraîchir runtime">↻</button>
+          </div>
         </div>
-        <div id="serverBadge" class="control-item server-badge"><span>On</span></div>
-        <button id="sendButton" class="send-button" onclick="sendMessage()" title="Envoyer">
-          <span class="button-spinner"></span>
-          <span id="sendLabel" class="send-arrow">↑</span>
-        </button>
-      </div>
-      <div class="composer-hint">Entree: nouvelle ligne &middot; Cmd/Ctrl+Entree: envoyer</div>
-    </footer>
+      </header>
+
+      <main class="main">
+        <section id="chat" class="page chat-page active">
+          <div class="compact-strip">
+            <div class="mode-pills" aria-label="Mode agent">
+              <button class="mode-pill active" data-mode="chat" title="Conversation seulement">Chat</button>
+              <button class="mode-pill" data-mode="agent" title="Lecture, écriture avec permission, erreurs, git read, terminal limité">Agent</button>
+              <button class="mode-pill" data-mode="full" title="Accès complet avec confirmations">Full</button>
+            </div>
+            <div class="runtime-card">
+              <span id="runtimeState">idle</span>
+              <span id="tokenMini">tokens: --</span>
+            </div>
+          </div>
+
+          <div id="messages" class="messages">
+            <div class="msg system">
+              <strong>Liix agent réel prêt.</strong>
+              <p>Commandes disponibles: /project, /errors, /read chemin, /write chemin, /delete chemin, /run commande, /git status.</p>
+            </div>
+          </div>
+
+          <div class="composer">
+            <textarea id="prompt" placeholder="Demande une analyse, ou lance /project, /errors, /read Core/Src/main.c, /run npm test"></textarea>
+            <div class="composer-actions">
+              <div id="queueLabel" class="queue-mini">Queue vide</div>
+              <button id="readFile" class="ghost">Fichier actif</button>
+              <button id="stop" class="danger" style="display:none;">Stop</button>
+              <button id="send" class="primary">Envoyer</button>
+            </div>
+          </div>
+        </section>
+
+        <section id="agent" class="page">
+          <div class="panel-grid">
+            <div class="card">
+              <div class="card-title">Modes agent <span id="agentModeBadge" class="badge">Chat</span></div>
+              <div class="row"><span class="label">Chat</span><span class="value">conversation, aucun write/run</span></div>
+              <div class="row"><span class="label">Agent</span><span class="value">outils projet avec permissions</span></div>
+              <div class="row"><span class="label">Full</span><span class="value">terminal et git complets avec garde-fous</span></div>
+            </div>
+            <div class="card">
+              <div class="card-title">États visuels <span id="stateBadge" class="badge ok">idle</span></div>
+              <div class="row"><span class="label">Analyse</span><span class="value">Analyse de la demande...</span></div>
+              <div class="row"><span class="label">Contexte</span><span class="value">Lecture workspace...</span></div>
+              <div class="row"><span class="label">Outil</span><span class="value">Exécution commande...</span></div>
+            </div>
+          </div>
+          <div id="permissionBox"></div>
+          <div class="card">
+            <div class="card-title">Actions rapides</div>
+            <div class="action-grid">
+              <button data-action="project">Analyser projet</button>
+              <button data-action="errors">Analyser erreurs</button>
+              <button data-action="gitStatus">git status</button>
+              <button data-action="gitDiff">git diff</button>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-title">Capacités réelles</div>
+            <div class="row"><span class="label">/read</span><span class="badge ok">actif</span></div>
+            <div class="row"><span class="label">/write /delete</span><span class="badge warn">permission</span></div>
+            <div class="row"><span class="label">/run</span><span class="badge warn">permission</span></div>
+            <div class="row"><span class="label">/git</span><span class="badge warn">read/permission</span></div>
+          </div>
+        </section>
+
+        <section id="terminal" class="page">
+          <div class="terminal">
+            <div class="compact-strip">
+              <div>
+                <div class="title">Terminal Liix</div>
+                <div class="label">stdout/stderr réels, historique, queue et retry.</div>
+              </div>
+              <button id="clearTerminal" class="ghost">Clear</button>
+            </div>
+            <div class="terminal-lanes">
+              <div class="lane"><div class="label">Queue</div><div id="terminalQueue" class="value">vide</div></div>
+              <div class="lane"><div class="label">Récentes</div><div id="recentCommands" class="value">--</div></div>
+              <div class="lane"><div class="label">Dernier état</div><div id="terminalState" class="value">prêt</div></div>
+            </div>
+            <div id="terminalOutput" class="terminal-output">
+              <div class="term-line stdout">Terminal Liix prêt.</div>
+            </div>
+            <div class="composer-actions">
+              <input id="terminalCommand" placeholder="/run make -j4 ou /git status" />
+              <button id="retryCommand" class="ghost">Retry</button>
+              <button id="runTerminal" class="primary">Run</button>
+            </div>
+          </div>
+        </section>
+
+        <section id="settings" class="page">
+          ${settingsHtml(defaultModel)}
+        </section>
+
+        <section id="account" class="page">
+          <div class="panel-grid">
+            <div class="card">
+              <div class="card-title">Account / Profile</div>
+              <div class="row"><span class="label">Nom</span><span id="accountName" class="value">Utilisateur Liix</span></div>
+              <div class="row"><span class="label">Email / provider</span><span id="accountEmail" class="value">--</span></div>
+              <div class="row"><span class="label">Modèle actif</span><span id="accountModel" class="value">${escapeHtml(defaultModel)}</span></div>
+              <div class="row"><span class="label">Provider actif</span><span id="accountProvider" class="value">${escapeHtml(defaultProvider)}</span></div>
+              <div class="row"><span class="label">Mode</span><span id="accountMode" class="value">cloud</span></div>
+              <div class="row"><span class="label">Abonnement</span><span id="accountSub" class="value">Developer</span></div>
+              <div class="row"><span class="label">API Key</span><span id="apiKeyMasked" class="value">sk-****-****-none</span></div>
+              <button id="copyApiKey" class="ghost">Copier API Key</button>
+            </div>
+            <div class="card">
+              <div class="card-title">Usage and Billing</div>
+              <div id="usageBox">
+                <div class="row"><span class="label">Usage</span><span class="value">Aucune requête encore.</span></div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <div id="toast" class="toast"></div>
+      <footer class="footer">
+        <span id="runtimeLine" class="truncate">Runtime: inspection en cours</span>
+        <span id="usageLine">tokens: --</span>
+      </footer>
+    </div>
   </div>
 
   <script>
     const vscode = acquireVsCodeApi();
-    const chat = document.getElementById("chat");
-    const input = document.getElementById("messageInput");
-    const modelSelect = document.getElementById("modelSelect");
-    const contextSelect = document.getElementById("contextSelect");
-    const permissionsMenu = document.getElementById("permissionsMenu");
-    const permissionsSummary = document.getElementById("permissionsSummary");
-    const permissionInputs = Array.from(document.querySelectorAll('.permissions-popover input'));
-    const usageChip = document.getElementById("usageChip");
-    const usagePercent = document.getElementById("usagePercent");
-    const usageCount = document.getElementById("usageCount");
-    const usageFill = document.getElementById("usageFill");
-    const serverBadge = document.getElementById("serverBadge");
-    const sendButton = document.getElementById("sendButton");
-    const sendLabel = document.getElementById("sendLabel");
+    let mode = "chat";
+    let promptQueue = [];
+    let busy = false;
+    let activeRequestId = "";
+    let cancelledRequests = new Set();
+    let lastTerminalCommand = "";
+    let recentCommands = [];
+    let lastErrorPrompt = "";
+    let runtimeState = {
+      provider: "${escapeJs(defaultProvider)}",
+      mode: "${escapeJs(defaultProvider === "local" ? "local" : "cloud")}",
+      endpoint: "",
+      model: "${escapeJs(defaultModel)}",
+      models: []
+    };
+    let loadingTimers = new Map();
+
+    const stateLabels = {
+      idle: "Prêt",
+      queued: "En file...",
+      analyzing: "Analyse de la demande...",
+      reading_context: "Lecture du contexte workspace...",
+      running_tool: "Exécution de la commande...",
+      streaming: "Réponse en cours...",
+      waiting_permission: "Permission requise",
+      error: "Erreur",
+      done: "Terminé"
+    };
+
     const waitingStates = [
       "Liix reflechit...",
       "Liix analyse...",
       "Liix ecrit...",
     ];
-    const aiControlState = {
-      contextMode: "question",
-      permissions: ["read-only", "terminal-forbidden"],
-      usage: {
-        usedInputTokens: 620,
-        usedOutputTokens: 620,
-        usedTotalTokens: 1240,
-        dailyLimit: 20000,
-        monthlyLimit: 500000,
-        dailyPercent: 6,
-        estimatedMessagesLeft: 37,
-        averageTokensPerMessage: 500
-      },
-      server: {
-        serverStatus: "online",
-        latencyMs: 42,
-        queuePosition: 0
+
+    const stepOrder = ["queued", "analyzing", "reading_context", "running_tool", "streaming", "done"];
+    const $ = (id) => document.getElementById(id);
+
+    document.querySelectorAll(".nav-btn").forEach((button) => {
+      button.addEventListener("click", () => {
+        document.querySelectorAll(".nav-btn").forEach((item) => item.classList.remove("active"));
+        document.querySelectorAll(".page").forEach((page) => page.classList.remove("active"));
+        button.classList.add("active");
+        $(button.dataset.page).classList.add("active");
+      });
+    });
+
+    document.querySelectorAll(".mode-pill").forEach((button) => {
+      button.addEventListener("click", () => {
+        document.querySelectorAll(".mode-pill").forEach((item) => item.classList.remove("active"));
+        button.classList.add("active");
+        mode = button.dataset.mode;
+        $("agentModeBadge").textContent = mode.charAt(0).toUpperCase() + mode.slice(1);
+      });
+    });
+
+    document.querySelectorAll(".settings-nav button").forEach((button) => {
+      button.addEventListener("click", () => {
+        document.querySelectorAll(".settings-nav button").forEach((item) => item.classList.remove("active"));
+        document.querySelectorAll(".settings-section").forEach((section) => section.classList.remove("active"));
+        button.classList.add("active");
+        $(button.dataset.settings).classList.add("active");
+      });
+    });
+
+    $("send").addEventListener("click", queuePrompt);
+    $("prompt").addEventListener("keydown", (event) => {
+      if ((event.metaKey || event.ctrlKey) && event.key === "Enter") queuePrompt();
+    });
+    $("stop").addEventListener("click", stopGeneration);
+    $("readFile").addEventListener("click", () => startDirectRequest("Lecture fichier actif", { type: "readActiveFile", modelId: $("model").value }));
+    $("refreshRuntime").addEventListener("click", () => vscode.postMessage({ type: "refreshRuntime" }));
+    $("model").addEventListener("change", () => vscode.postMessage({ type: "selectModel", modelId: $("model").value }));
+    $("clearTerminal").addEventListener("click", () => { $("terminalOutput").innerHTML = '<div class="term-line stdout">Terminal Liix prêt.</div>'; });
+    $("runTerminal").addEventListener("click", runTerminalCommand);
+    $("retryCommand").addEventListener("click", retryLast);
+    $("copyApiKey").addEventListener("click", () => vscode.postMessage({ type: "copyApiKey" }));
+    $("refreshModels").addEventListener("click", () => vscode.postMessage({ type: "refreshModels" }));
+    $("runtimeProvider").addEventListener("change", saveRuntimeSettings);
+    $("runtimeLocalApiType").addEventListener("change", saveRuntimeSettings);
+    $("runtimeLocalEndpoint").addEventListener("change", saveRuntimeSettings);
+    $("runtimeDefaultModel").addEventListener("change", saveRuntimeSettings);
+
+    document.querySelectorAll("[data-action]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const action = button.dataset.action;
+        if (action === "project") startDirectRequest("Analyser projet", { type: "runQuickAction", mode, action: { kind: "project" } });
+        if (action === "errors") startDirectRequest("Analyser erreurs", { type: "runQuickAction", mode, action: { kind: "errors" } });
+        if (action === "gitStatus") startDirectRequest("git status", { type: "runQuickAction", mode, action: { kind: "git", command: "git status" } });
+        if (action === "gitDiff") startDirectRequest("git diff", { type: "runQuickAction", mode, action: { kind: "git", command: "git diff" } });
+      });
+    });
+
+    function queuePrompt() {
+      const text = $("prompt").value.trim();
+      if (!text) return;
+      $("prompt").value = "";
+      promptQueue.push({ text, requestId: makeRequestId() });
+      updateQueue();
+      dispatchQueue();
+    }
+
+    function dispatchQueue() {
+      if (busy || promptQueue.length === 0) return;
+      const item = promptQueue.shift();
+      busy = true;
+      activeRequestId = item.requestId;
+      setBusyUi(true);
+      updateQueue();
+      setAgentStatus("queued", stateLabels.queued, item.requestId);
+
+      if (item.directPayload) {
+        item.directPayload.requestId = item.requestId;
+        vscode.postMessage(item.directPayload);
+        return;
       }
-    };
-    let isGenerating = false;
-    let waitingTimer = undefined;
-    let waitingIndex = 0;
-    let loadingBubble = undefined;
 
-    function estimateTokens(text) {
-      return Math.ceil(String(text || "").length / 4);
+      lastErrorPrompt = item.text;
+      vscode.postMessage({ type: "sendMessage", requestId: item.requestId, modelId: $("model").value, message: item.text, mode });
     }
 
-    function formatNumber(value) {
-      return new Intl.NumberFormat("fr-CA").format(value);
-    }
-
-    function recalcUsage() {
-      const usage = aiControlState.usage;
-      usage.usedTotalTokens = usage.usedInputTokens + usage.usedOutputTokens;
-      usage.dailyPercent = Math.min(100, Math.round((usage.usedTotalTokens / usage.dailyLimit) * 100));
-      usage.estimatedMessagesLeft = Math.max(0, Math.floor((usage.dailyLimit - usage.usedTotalTokens) / usage.averageTokensPerMessage));
-    }
-
-    function updateUsageUi() {
-      recalcUsage();
-      const usage = aiControlState.usage;
-      usagePercent.textContent = usage.dailyPercent + "%";
-      usageCount.textContent = formatNumber(usage.usedTotalTokens) + " / " + formatNumber(usage.dailyLimit);
-      usageFill.style.width = usage.dailyPercent + "%";
-      usageChip.classList.toggle("warn", usage.dailyPercent >= 85 && usage.dailyPercent < 100);
-      usageChip.classList.toggle("limit", usage.dailyPercent >= 100);
-      usageChip.title =
-        "Input: " + formatNumber(usage.usedInputTokens) +
-        " | Output: " + formatNumber(usage.usedOutputTokens) +
-        " | Restants estimes: " + formatNumber(usage.estimatedMessagesLeft) +
-        " | Mensuel: " + formatNumber(usage.monthlyLimit);
-    }
-
-    function getServerLabel() {
-      const server = aiControlState.server;
-
-      if (server.serverStatus === "queue") {
-        return "Q" + server.queuePosition;
+    function startDirectRequest(label, payload) {
+      if (busy) {
+        promptQueue.push({ text: label, requestId: makeRequestId(), directPayload: payload });
+        updateQueue();
+        return;
       }
 
-      const shortLabels = {
-        online: "On",
-        busy: "Busy",
-        offline: "Off",
-        training: "Train"
-      };
-
-      return shortLabels[server.serverStatus] || server.serverStatus.charAt(0).toUpperCase() + server.serverStatus.slice(1);
+      const requestId = makeRequestId();
+      busy = true;
+      activeRequestId = requestId;
+      setBusyUi(true);
+      setAgentStatus("queued", stateLabels.queued, requestId);
+      payload.requestId = requestId;
+      vscode.postMessage(payload);
     }
 
-    function updateServerUi() {
-      const server = aiControlState.server;
-      serverBadge.innerHTML = "<span>" + getServerLabel() + "</span>";
-      serverBadge.className = "control-item server-badge " + server.serverStatus;
-      serverBadge.title =
-        "Serveur mock/dev | Status: " + server.serverStatus +
-        " | Latence: " + server.latencyMs + " ms" +
-        " | Queue: " + server.queuePosition;
+    function stopGeneration() {
+      if (!activeRequestId) return;
+      cancelledRequests.add(activeRequestId);
+      removeLoading(activeRequestId);
+      appendSystem("Génération arrêtée côté interface. La commande backend peut finir en arrière-plan.");
+      finishRequest(activeRequestId, "idle");
     }
 
-    function updatePermissionsState() {
-      aiControlState.permissions = permissionInputs
-        .filter((input) => input.checked)
-        .map((input) => input.value);
-
-      const labels = [];
-      const shortLabels = [];
-      if (aiControlState.permissions.includes("read-only")) { labels.push("Lecture seule"); shortLabels.push("RO"); }
-      if (aiControlState.permissions.includes("ask-before-edit")) { labels.push("Demander avant modification"); shortLabels.push("Ask"); }
-      if (aiControlState.permissions.includes("auto-apply")) { labels.push("Auto apply"); shortLabels.push("Auto"); }
-      if (aiControlState.permissions.includes("terminal-forbidden")) { labels.push("Terminal interdit"); shortLabels.push("NoT"); }
-      if (aiControlState.permissions.includes("terminal-approval")) { labels.push("Terminal avec approbation"); shortLabels.push("TA"); }
-      if (aiControlState.permissions.includes("build-allowed")) { labels.push("Build autorise"); shortLabels.push("Build"); }
-      permissionsSummary.textContent = shortLabels[0] || "Perm";
-      permissionsSummary.title = labels.join(" | ");
-    }
-
-    function appendMessage(role, text, options = {}) {
-      const message = document.createElement("div");
-      message.className = "message " + role;
-
-      const label = document.createElement("span");
-      label.className = "role";
-      label.textContent = role === "user" ? "Vous" : role === "error" ? "Erreur Liix" : "Liix AI";
-
-      const content = document.createElement("span");
-      content.className = "content";
-
-      message.appendChild(label);
-      message.appendChild(content);
-      chat.appendChild(message);
-      chat.scrollTop = chat.scrollHeight;
-
-      if (options.typewriter) {
-        typeText(content, text);
+    function runTerminalCommand() {
+      const raw = $("terminalCommand").value.trim();
+      if (!raw) return;
+      lastTerminalCommand = raw;
+      rememberCommand(raw);
+      $("terminalCommand").value = "";
+      $("terminalQueue").textContent = raw;
+      if (raw.startsWith("/git ")) {
+        startDirectRequest(raw, { type: "runQuickAction", mode: "full", action: { kind: "git", command: "git " + raw.slice(5) } });
       } else {
-        content.textContent = text;
+        startDirectRequest(raw, { type: "runQuickAction", mode: "full", action: { kind: "terminal", command: raw.replace(/^\\/run\\s+/, "") } });
       }
-
-      return message;
     }
 
-    function typeText(target, text) {
+    function retryLast() {
+      if (lastTerminalCommand) {
+        $("terminalCommand").value = lastTerminalCommand;
+        runTerminalCommand();
+        return;
+      }
+
+      if (lastErrorPrompt) {
+        $("prompt").value = lastErrorPrompt;
+        queuePrompt();
+      }
+    }
+
+    function appendMessage(kind, content, requestId, streaming) {
+      const div = document.createElement("div");
+      div.className = "msg " + kind;
+      if (requestId) div.dataset.requestId = requestId;
+      $("messages").appendChild(div);
+      $("messages").scrollTop = $("messages").scrollHeight;
+
+      if (streaming) {
+        typeText(div, content, () => {
+          div.innerHTML = renderMarkdown(content);
+          finishRequest(requestId, "done");
+        }, requestId);
+        return div;
+      }
+
+      div.innerHTML = renderMarkdown(content);
+      return div;
+    }
+
+    function appendSystem(content, variant) {
+      const div = appendMessage(variant || "system", content);
+      div.classList.add(variant || "system");
+    }
+
+    function showLoading(requestId, state, label) {
+      startLoadingBubble(requestId, state, label);
+    }
+
+    function startLoadingBubble(requestId, state, label) {
+      stopLoadingBubble(requestId);
+      const div = document.createElement("div");
+      div.className = "msg system loading-message message assistant loading";
+      div.dataset.loadingFor = requestId || "global";
+      div.innerHTML =
+        '<div class="loading">' +
+        '<div class="ai-ring"></div>' +
+        '<div class="loading-text">' +
+        '<div class="loading-title"><span class="content">' + escapeHtml(label || stateLabels[state] || "Liix travaille") + '</span></div>' +
+        '<div class="loading-subtitle">' + waitingStates[0] + '</div>' +
+        '</div>' +
+        '</div>';
+      $("messages").appendChild(div);
+      $("messages").scrollTop = $("messages").scrollHeight;
+      startWaitingRotation(requestId || "global", div);
+    }
+
+    function stopLoadingBubble(requestId) {
+      removeLoading(requestId);
+    }
+
+    function removeLoading(requestId) {
+      const key = requestId || "global";
+      if (loadingTimers.has(key)) {
+        clearInterval(loadingTimers.get(key));
+        loadingTimers.delete(key);
+      }
+      document.querySelectorAll('[data-loading-for="' + cssEscape(key) + '"]').forEach((node) => node.remove());
+    }
+
+    function startWaitingRotation(requestId, container) {
+      let index = 0;
+      const subtitle = container.querySelector(".loading-subtitle");
+      if (!subtitle) return;
+      const timer = window.setInterval(() => {
+        index = (index + 1) % waitingStates.length;
+        subtitle.classList.add("fade");
+        window.setTimeout(() => {
+          subtitle.textContent = waitingStates[index];
+          subtitle.classList.remove("fade");
+          $("messages").scrollTop = $("messages").scrollHeight;
+        }, 120);
+      }, 850);
+      loadingTimers.set(requestId, timer);
+    }
+
+    function renderSteps(state) {
+      const currentIndex = stepOrder.indexOf(state);
+      return stepOrder.map((step, index) => {
+        const klass = index < currentIndex ? "step done" : index === currentIndex ? "step active" : "step";
+        return '<span class="' + klass + '">' + escapeHtml(shortState(step)) + '</span>';
+      }).join("");
+    }
+
+    function shortState(state) {
+      return {
+        queued: "reçu",
+        analyzing: "analyse",
+        reading_context: "contexte",
+        running_tool: "outil",
+        streaming: "réponse",
+        done: "terminé"
+      }[state] || state;
+    }
+
+    function typeText(target, text, done, requestId) {
       target.classList.add("typing-caret");
       const chunks = text.match(/\\S+\\s*|\\n+/g) || [text];
       let index = 0;
 
       function writeNextChunk() {
+        if (requestId && cancelledRequests.has(requestId)) {
+          target.classList.remove("typing-caret");
+          target.remove();
+          if (done) done();
+          return;
+        }
+
         if (index >= chunks.length) {
           target.classList.remove("typing-caret");
+          if (done) done();
           return;
         }
 
         target.textContent += chunks[index];
         index += 1;
-        chat.scrollTop = chat.scrollHeight;
+        $("messages").scrollTop = $("messages").scrollHeight;
 
         const delay = chunks[index - 1].includes("\\n") ? 42 : 22 + Math.floor(Math.random() * 28);
         window.setTimeout(writeNextChunk, delay);
@@ -1036,165 +1591,228 @@ export class LiixAiPanelProvider implements vscode.WebviewViewProvider {
       writeNextChunk();
     }
 
-    function setGenerating(active) {
-      isGenerating = active;
-      input.disabled = active;
-      modelSelect.disabled = active;
-      contextSelect.disabled = active;
-      permissionInputs.forEach((input) => input.disabled = active);
-      sendButton.classList.toggle("loading", active);
-      sendLabel.textContent = active ? "" : "\\u2191";
-      updateSendAvailability();
+    function appendTerminal(content, stream) {
+      const div = document.createElement("div");
+      div.className = "term-line " + (stream || "stdout");
+      div.textContent = content;
+      $("terminalOutput").appendChild(div);
+      $("terminalOutput").scrollTop = $("terminalOutput").scrollHeight;
+      $("terminalState").textContent = stream === "stderr" ? "stderr" : stream === "command" ? "commande" : "stdout";
+      if (stream === "command") {
+        $("terminalQueue").textContent = content;
+      }
     }
 
-    function startLoadingBubble() {
-      waitingIndex = 0;
-      loadingBubble = document.createElement("div");
-      loadingBubble.className = "message assistant loading";
-      loadingBubble.dataset.loadingBubble = "true";
-      loadingBubble.innerHTML =
-        '<div class="ai-ring"></div>' +
-        '<div class="loading-text">' +
-        '<div class="loading-title"><span class="content">Liix travaille</span></div>' +
-        '<div id="loadingSubtitle" class="loading-subtitle">' + waitingStates[waitingIndex] + '</div>' +
+    function showPermission(request, requestId) {
+      const box = $("permissionBox");
+      box.innerHTML = "";
+      const div = document.createElement("div");
+      div.className = "card permission";
+      div.innerHTML =
+        '<div class="card-title">Permission requise <span class="badge high">' + escapeHtml(request.risk) + '</span></div>' +
+        '<div class="row"><span class="label">Action</span><span class="value">' + escapeHtml(request.action) + '</span></div>' +
+        '<div class="row"><span class="label">Commande</span><span class="value">' + escapeHtml(request.command || "--") + '</span></div>' +
+        '<div class="row"><span class="label">Workspace</span><span class="value">' + escapeHtml(request.workspace) + '</span></div>' +
+        '<div class="row"><span class="label">Fichiers</span><span class="value">' + escapeHtml((request.files || []).join(", ") || "--") + '</span></div>' +
+        '<div class="permission-actions">' +
+        '<button data-decision="allowOnce">Allow once</button>' +
+        '<button data-decision="allowSession">Allow session</button>' +
+        '<button data-decision="alwaysAllow">Always allow</button>' +
+        '<button class="danger" data-decision="deny">Deny</button>' +
         '</div>';
-      chat.appendChild(loadingBubble);
-      chat.scrollTop = chat.scrollHeight;
-
-      waitingTimer = window.setInterval(() => {
-        waitingIndex = (waitingIndex + 1) % waitingStates.length;
-        const loadingSubtitle = document.getElementById("loadingSubtitle");
-        if (loadingSubtitle) {
-          loadingSubtitle.style.opacity = "0";
-          window.setTimeout(() => {
-            loadingSubtitle.textContent = waitingStates[waitingIndex];
-            loadingSubtitle.style.opacity = "1";
-            chat.scrollTop = chat.scrollHeight;
-          }, 120);
-        }
-      }, 850);
+      box.appendChild(div);
+      appendMessage("permission", "Permission requise pour " + request.action + ". Ouvre l'onglet Agent pour décider.", requestId);
+      div.querySelectorAll("button").forEach((button) => {
+        button.addEventListener("click", () => {
+          vscode.postMessage({ type: "permissionDecision", requestId: request.id, decision: button.dataset.decision });
+          box.innerHTML = "";
+        });
+      });
+      document.querySelector('[data-page="agent"]').click();
     }
 
-    function stopLoadingBubble() {
-      if (waitingTimer) {
-        window.clearInterval(waitingTimer);
-        waitingTimer = undefined;
-      }
-
-      if (loadingBubble) {
-        loadingBubble.remove();
-        loadingBubble = undefined;
+    function setAgentStatus(state, label, requestId) {
+      const normalized = state || "idle";
+      $("agentDot").className = "status-dot " + normalized + (isBusyState(normalized) ? " active" : "");
+      $("agentLabel").textContent = label || stateLabels[normalized] || normalized;
+      $("runtimeState").textContent = normalized;
+      $("stateBadge").textContent = normalized;
+      $("stateBadge").className = "badge " + (normalized === "error" ? "high" : normalized === "done" || normalized === "idle" ? "ok" : "warn");
+      if (isBusyState(normalized)) {
+        showLoading(requestId || activeRequestId, normalized, label);
+      } else if (normalized === "done" || normalized === "idle") {
+        removeLoading(requestId || activeRequestId);
       }
     }
 
-    function beginRequest() {
-      setGenerating(true);
-      startLoadingBubble();
+    function isBusyState(state) {
+      return ["queued", "analyzing", "reading_context", "running_tool", "streaming", "waiting_permission"].includes(state);
     }
 
-    function finishRequest() {
-      stopLoadingBubble();
-      setGenerating(false);
+    function finishRequest(requestId, state) {
+      removeLoading(requestId);
+      if (!requestId || requestId === activeRequestId) {
+        busy = false;
+        activeRequestId = "";
+        setBusyUi(false);
+        setAgentStatus(state || "done", stateLabels[state || "done"], requestId);
+        updateQueue();
+        dispatchQueue();
+      }
     }
 
-    function sendMessage() {
-      const text = input.value.trim();
+    function setBusyUi(isBusy) {
+      $("stop").style.display = isBusy ? "inline-block" : "none";
+      $("send").disabled = false;
+    }
 
-      if (!text || isGenerating) {
-        updateSendAvailability();
+    function updateQueue() {
+      if (!promptQueue.length) {
+        $("queueLabel").textContent = busy ? "Queue: génération en cours" : "Queue vide";
         return;
       }
+      $("queueLabel").textContent = "Queue: " + promptQueue.length + " · " + promptQueue.map((item) => item.text).join(" / ");
+    }
 
-      appendMessage("user", text);
-      input.value = "";
-      aiControlState.usage.usedInputTokens += estimateTokens(text);
-      updateUsageUi();
-      beginRequest();
+    function rememberCommand(command) {
+      recentCommands = [command].concat(recentCommands.filter((item) => item !== command)).slice(0, 4);
+      $("recentCommands").textContent = recentCommands.join(" · ");
+    }
+
+    function setRuntime(runtime) {
+      runtimeState = {
+        provider: runtime.activeProvider || runtime.provider,
+        mode: runtime.activeMode || (runtime.localMode ? "local" : "cloud"),
+        endpoint: runtime.activeEndpoint || runtime.localApiUrl || "",
+        model: runtime.activeModel || runtime.localModel || $("model").value,
+        models: runtime.models || []
+      };
+      syncModelDropdown(runtimeState.models, runtimeState.model);
+      $("runtimeLine").textContent = "Runtime: " + runtimeState.mode + " · " + runtimeState.endpoint + " · git " + (runtime.gitAvailable ? "OK" : "--");
+      $("runtimeMini").textContent = runtime.localMode ? runtime.localApiType + " · " + runtimeState.model : "cloud · API";
+      $("workspaceLabel").textContent = runtime.workspace;
+      $("connectionBadge").textContent = runtimeState.mode;
+      $("accountName").textContent = runtime.account.name;
+      $("accountEmail").textContent = runtime.account.email || "--";
+      $("accountProvider").textContent = runtimeState.provider;
+      $("accountMode").textContent = runtimeState.mode;
+      $("accountSub").textContent = runtime.account.subscription;
+      $("accountModel").textContent = runtimeState.model;
+      $("apiKeyMasked").textContent = runtime.apiKeyMasked;
+      $("runtimeProvider").value = runtimeState.provider;
+      $("runtimeLocalApiType").value = runtime.localApiType;
+      $("runtimeLocalEndpoint").value = runtime.localApiUrl || "";
+      $("runtimeDefaultModel").value = runtimeState.model;
+      $("settingsRuntimeSummary").textContent = runtimeState.mode + " · " + runtimeState.endpoint + " · " + runtimeState.model;
+      $("usageModeLine").textContent = runtime.localMode ? "Unlimited local usage" : "Usage API cloud";
+    }
+
+    function syncModelDropdown(models, activeModel) {
+      const select = $("model");
+      const current = activeModel || select.value;
+      select.innerHTML = "";
+      (models.length ? models : [{ id: current, label: current }]).forEach((model) => {
+        const option = document.createElement("option");
+        option.value = model.id;
+        option.textContent = model.label || model.id;
+        select.appendChild(option);
+      });
+      select.value = current;
+      $("runtimeDefaultModel").value = current;
+      $("modelCount").textContent = String(models.length || 1);
+    }
+
+    function saveRuntimeSettings() {
+      const provider = $("runtimeProvider").value;
+      const localApiType = $("runtimeLocalApiType").value;
+      const selectedModel = $("runtimeDefaultModel").value || $("model").value;
       vscode.postMessage({
-        type: "sendMessage",
-        modelId: modelSelect.value,
-        message: text,
-        contextMode: aiControlState.contextMode,
-        permissions: aiControlState.permissions
+        type: "settingsChanged",
+        provider,
+        localApiType,
+        localApiUrl: $("runtimeLocalEndpoint").value,
+        localModel: provider === "local" ? selectedModel : undefined,
+        defaultModel: provider === "liix" ? selectedModel : undefined
       });
     }
 
-    function readActiveFile() {
-      if (isGenerating) return;
-
-      beginRequest();
-      aiControlState.usage.usedInputTokens += estimateTokens("Lire le fichier actif");
-      updateUsageUi();
-      vscode.postMessage({
-        type: "readActiveFile",
-        modelId: modelSelect.value,
-        contextMode: aiControlState.contextMode,
-        permissions: aiControlState.permissions
-      });
+    function setUsage(usage) {
+      $("usageLine").textContent = "tokens: " + usage.totalTokens + " · " + usage.provider;
+      $("tokenMini").textContent = "tokens: " + usage.totalTokens;
+      $("accountModel").textContent = usage.model;
+      $("usageBox").innerHTML =
+        '<div class="row"><span class="label">Modèle</span><span class="value">' + escapeHtml(usage.model) + '</span></div>' +
+        '<div class="row"><span class="label">Provider</span><span class="value">' + escapeHtml(usage.local ? "local" : usage.provider) + '</span></div>' +
+        '<div class="row"><span class="label">Prompt</span><span class="value">' + usage.promptTokens + '</span></div>' +
+        '<div class="row"><span class="label">Réponse</span><span class="value">' + usage.responseTokens + '</span></div>' +
+        '<div class="row"><span class="label">Total tokens</span><span class="value">' + usage.totalTokens + '</span></div>' +
+        '<div class="row"><span class="label">Coûts / limite</span><span class="value">' + escapeHtml(usage.cost) + '</span></div>' +
+        '<div class="row"><span class="label">Vitesse</span><span class="value">' + escapeHtml(usage.latency) + '</span></div>';
     }
 
-    function analyzeErrors() {
-      if (isGenerating) return;
-
-      beginRequest();
-      aiControlState.usage.usedInputTokens += estimateTokens("Analyser erreurs");
-      updateUsageUi();
-      vscode.postMessage({
-        type: "analyzeErrors",
-        modelId: modelSelect.value,
-        contextMode: aiControlState.contextMode,
-        permissions: aiControlState.permissions
-      });
+    function showToast(content) {
+      $("toast").textContent = content;
+      $("toast").style.display = "block";
+      setTimeout(() => { $("toast").style.display = "none"; }, 1800);
     }
 
-    function updateContextMode() {
-      aiControlState.contextMode = contextSelect.value;
+    function renderMarkdown(text) {
+      const fence = String.fromCharCode(96, 96, 96);
+      const parts = String(text).split(fence);
+      return parts.map((part, index) => {
+        if (index % 2 === 1) {
+          const lines = part.replace(/^\\n/, "").split("\\n");
+          const lang = lines[0] && /^[a-z0-9_+#.-]+$/i.test(lines[0]) ? lines.shift() : "code";
+          return '<div class="code-block"><div class="code-lang">' + escapeHtml(lang || "code") + '</div><pre><code>' + escapeHtml(lines.join("\\n")) + '</code></pre></div>';
+        }
+
+        return part
+          .split(/\\n{2,}/)
+          .filter(Boolean)
+          .map((paragraph) => '<p>' + escapeInlineMarkdown(paragraph).replace(/\\n/g, "<br>") + '</p>')
+          .join("");
+      }).join("");
     }
 
-    function updateSendAvailability() {
-      const serverStatus = aiControlState.server.serverStatus;
-      const quotaReached = aiControlState.usage.usedTotalTokens >= aiControlState.usage.dailyLimit;
-      const serverBlocksSend = serverStatus === "offline";
-      sendButton.disabled = isGenerating || input.value.trim().length === 0 || quotaReached || serverBlocksSend;
+    function escapeInlineMarkdown(value) {
+      const tick = String.fromCharCode(96);
+      return escapeHtml(value)
+        .replace(new RegExp(tick + "([^" + tick + "]+)" + tick, "g"), "<code>$1</code>")
+        .replace(/\\*\\*([^*]+)\\*\\*/g, "<strong>$1</strong>");
     }
 
-    input.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-        sendMessage();
-      }
-    });
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
+    }
 
-    input.addEventListener("input", updateSendAvailability);
-    modelSelect.addEventListener("change", updateSendAvailability);
-    contextSelect.addEventListener("change", updateContextMode);
-    permissionInputs.forEach((permissionInput) => {
-      permissionInput.addEventListener("change", updatePermissionsState);
-    });
-    updateContextMode();
-    updatePermissionsState();
-    updateUsageUi();
-    updateServerUi();
-    updateSendAvailability();
+    function cssEscape(value) {
+      if (window.CSS && CSS.escape) return CSS.escape(value);
+      return String(value).replace(/"/g, "\\\\22 ");
+    }
+
+    function makeRequestId() {
+      return String(Date.now()) + "-" + Math.random().toString(16).slice(2);
+    }
 
     window.addEventListener("message", (event) => {
-      const message = event.data;
-
-      if (message.type === "assistantMessage") {
-        finishRequest();
-        aiControlState.usage.usedOutputTokens += estimateTokens(message.content);
-        updateUsageUi();
-        appendMessage("assistant", message.content, { typewriter: true });
+      const msg = event.data;
+      if (msg.requestId && cancelledRequests.has(msg.requestId) && msg.type !== "agentStatus") return;
+      if (msg.type === "userMessage") appendMessage("user", msg.content, msg.requestId);
+      if (msg.type === "assistantMessage") {
+        removeLoading(msg.requestId || activeRequestId);
+        appendMessage("assistant", msg.content, msg.requestId || activeRequestId, true);
       }
-
-      if (message.type === "errorMessage") {
-        finishRequest();
-        appendMessage("error", message.content || "Liix a rencontre un souci. Reessaie ou verifie la console de developpement.");
+      if (msg.type === "errorMessage") {
+        appendMessage("error", msg.content, msg.requestId || activeRequestId);
+        finishRequest(msg.requestId || activeRequestId, "error");
       }
-    });
-
-    window.addEventListener("error", () => {
-      finishRequest();
-      appendMessage("error", "Liix a rencontre un souci. Reessaie ou verifie la console de developpement.");
+      if (msg.type === "permissionRequest") showPermission(msg.request, msg.requestId);
+      if (msg.type === "terminalEvent") appendTerminal(msg.content, msg.stream);
+      if (msg.type === "agentStatus") setAgentStatus(msg.state, msg.label, msg.requestId);
+      if (msg.type === "toast") showToast(msg.content);
+      if (msg.type === "usage") setUsage(msg.usage);
+      if (msg.type === "runtime") setRuntime(msg.runtime);
+      if (msg.type === "systemMessage") appendSystem(msg.content);
     });
   </script>
 </body>
@@ -1202,15 +1820,120 @@ export class LiixAiPanelProvider implements vscode.WebviewViewProvider {
   }
 }
 
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
+function buildPrompt(text: string, mode: LiixAgentMode, toolContext: string): string {
+  return [
+    `Mode Liix: ${mode.toUpperCase()}`,
+    "Réponds comme un assistant de code VS Code. Si un résultat outil est fourni, base-toi dessus.",
+    toolContext ? `\nContexte outil:\n${toolContext}` : "",
+    `\nDemande utilisateur:\n${text}`
+  ].join("\n");
 }
 
-function waitForMockResponse(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, 800));
+function createPermissionKey(action: LiixAgentAction): string {
+  return `${action.kind}:${action.command || ""}:${action.filePath || ""}`;
+}
+
+function formatAgentResult(result: {
+  title: string;
+  summary: string;
+  details: string;
+}) {
+  return [
+    `[Liix] ${result.title}`,
+    result.summary,
+    "",
+    result.details
+  ].join("\n");
+}
+
+function estimateTokens(text: string): number {
+  return Math.max(1, Math.ceil(text.length / 4));
+}
+
+function getRuntimeModelLabel(modelId: string): string {
+  if (getLiixProvider() === "local") {
+    return modelId || getLiixLocalModel();
+  }
+
+  return getAiModelLabel(modelId);
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    "\"": "&quot;",
+    "'": "&#39;"
+  }[char] || char));
+}
+
+function escapeJs(value: string): string {
+  return value.replace(/[\\"]/g, (char) => `\\${char}`);
+}
+
+function settingsHtml(defaultModel: string): string {
+  return `
+    <div class="settings-layout">
+      <div class="settings-nav">
+        <button class="active" data-settings="settings-general">General</button>
+        <button data-settings="settings-models">Models</button>
+        <button data-settings="settings-permissions">Permissions</button>
+        <button data-settings="settings-plugins">Plugins</button>
+        <button data-settings="settings-usage">Usage</button>
+      </div>
+      <div>
+        <div id="settings-general" class="settings-section active">
+          <div class="card"><div class="card-title">General</div>
+            <div class="field"><span class="label">Langue</span><select><option>Français</option><option>English</option></select></div>
+            <div class="field"><span class="label">Thème</span><select><option>Dark VS Code</option><option>System</option></select></div>
+            <div class="row"><span class="label">Raccourcis clavier</span><span class="badge ok">Cmd/Ctrl+Enter</span></div>
+            <div class="row"><span class="label">Auto-save prompts</span><span class="badge ok">On</span></div>
+            <div class="row"><span class="label">Telemetry</span><span class="badge">Off</span></div>
+            <div class="row"><span class="label">Animations UI</span><span class="badge ok">On</span></div>
+          </div>
+        </div>
+        <div id="settings-models" class="settings-section">
+          <div class="card"><div class="card-title">Models / Runtime <button id="refreshModels" class="ghost">Refresh models</button></div>
+            <div class="field"><span class="label">Provider actif</span><select id="runtimeProvider"><option value="liix">Liix Cloud</option><option value="local">Local</option></select></div>
+            <div class="field"><span class="label">Runtime local</span><select id="runtimeLocalApiType"><option value="ollama">Ollama</option><option value="openai-compatible">LM Studio / OpenAI-compatible</option></select></div>
+            <div class="field"><span class="label">Endpoint local</span><input id="runtimeLocalEndpoint" value="${escapeHtml(getLiixLocalApiUrl())}" /></div>
+            <div class="field"><span class="label">Modèle actif</span><input id="runtimeDefaultModel" value="${escapeHtml(defaultModel)}" /></div>
+            <div class="row"><span class="label">Source actuelle</span><span id="settingsRuntimeSummary" class="value">${escapeHtml(getLiixProvider())} · ${escapeHtml(getLiixLocalApiType())} · ${escapeHtml(getLiixLocalModel())}</span></div>
+            <div class="row"><span class="label">Modèles disponibles</span><span id="modelCount" class="value">--</span></div>
+            <div class="row"><span class="label">Timeout IA</span><span class="value">120s</span></div>
+            <div class="row"><span class="label">Max tokens</span><span class="value">4096</span></div>
+            <div class="row"><span class="label">Température</span><span class="value">0.2</span></div>
+          </div>
+        </div>
+        <div id="settings-permissions" class="settings-section">
+          <div class="card"><div class="card-title">Permissions</div>
+            <div class="row"><span class="label">Terminal</span><span class="badge warn">ask</span></div>
+            <div class="row"><span class="label">Fichiers</span><span class="badge warn">ask</span></div>
+            <div class="row"><span class="label">Git</span><span class="badge warn">read/ask</span></div>
+            <div class="row"><span class="label">Mode Chat</span><span class="value">aucune écriture</span></div>
+            <div class="row"><span class="label">Mode Agent</span><span class="value">outils limités</span></div>
+            <div class="row"><span class="label">Mode Full</span><span class="value">confirmations visibles</span></div>
+          </div>
+        </div>
+        <div id="settings-plugins" class="settings-section">
+          <div class="card"><div class="card-title">Plugins and Add-ons</div>
+            <div class="row"><span class="label">Filesystem</span><span class="badge ok">installé</span></div>
+            <div class="row"><span class="label">Git</span><span class="badge ok">installé</span></div>
+            <div class="row"><span class="label">Terminal</span><span class="badge ok">installé</span></div>
+            <div class="row"><span class="label">RAG</span><span class="badge">placeholder</span></div>
+            <div class="row"><span class="label">Local models</span><span class="badge ok">Ollama / LM Studio</span></div>
+          </div>
+        </div>
+        <div id="settings-usage" class="settings-section">
+          <div class="card"><div class="card-title">Usage and Billing</div>
+            <div class="row"><span class="label">Mode actif</span><span id="usageModeLine" class="badge ok">Unlimited local usage</span></div>
+            <div class="row"><span class="label">Cloud</span><span class="value">selon provider</span></div>
+            <div class="row"><span class="label">Contexte max</span><span class="value">workspace + actif</span></div>
+            <div class="row"><span class="label">Dossier workspace</span><span class="value">${escapeHtml(getWorkspaceRoot() || "--")}</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
 }

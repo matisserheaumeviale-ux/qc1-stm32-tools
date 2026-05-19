@@ -15,6 +15,7 @@ let dashboardState = dashboardState_1.defaultDashboardState;
 let dashboardPanel;
 let progressTimer;
 let outputChannel;
+let stlinkProbeStatus = "non testé";
 function fileExists(filePath) {
     try {
         return fs.existsSync(filePath);
@@ -94,22 +95,98 @@ function getExistingSettingPath(config, key) {
     const configuredPath = (config.get(key) || "").trim();
     return configuredPath && fileExists(configuredPath) ? configuredPath : "";
 }
+function createQc1Error(input) {
+    return {
+        code: input.code || "QC1-EXT-001",
+        title: input.title || "Erreur interne extension",
+        message: input.message || "Une erreur inattendue est survenue.",
+        cause: input.cause,
+        command: input.command,
+        cwd: input.cwd,
+        exitCode: input.exitCode ?? null,
+        stdout: input.stdout,
+        stderr: input.stderr,
+        path: input.path
+    };
+}
+function getExitCode(error) {
+    const code = error?.code;
+    return typeof code === "number" ? code : null;
+}
+function isTimeoutError(error) {
+    const err = error;
+    return Boolean(err?.killed && err.signal === "SIGTERM") || Boolean(err?.message?.toLowerCase().includes("timed out"));
+}
+function isAllowedQc1Command(command) {
+    return [
+        "make",
+        "build",
+        "clean",
+        "rebuild",
+        "tsmake",
+        "flash",
+        "run",
+        "health",
+        "status",
+        "error",
+        "serial",
+        "dev"
+    ].includes(command);
+}
+function readStlinkProbeStatus(output) {
+    const lower = output.toLowerCase();
+    if (lower.includes("no device found") ||
+        lower.includes("no st-link") ||
+        lower.includes("st-link not found") ||
+        lower.includes("stlink not found") ||
+        lower.includes("unable to connect") ||
+        lower.includes("target voltage")) {
+        return "non détecté";
+    }
+    if (lower.includes("st-link") ||
+        lower.includes("stlink") ||
+        lower.includes("target voltage") ||
+        lower.includes("device connected")) {
+        return "OK";
+    }
+    return "non testé";
+}
+function normalizeMakefileDir(configuredPath) {
+    if (!configuredPath || !fileExists(configuredPath)) {
+        return "";
+    }
+    try {
+        const stat = fs.statSync(configuredPath);
+        return stat.isFile() ? path.dirname(configuredPath) : configuredPath;
+    }
+    catch {
+        return "";
+    }
+}
 function getQc1Status(context) {
     const config = vscode.workspace.getConfiguration("qc1");
     const workspaceRoot = getWorkspaceRoot() || "";
-    const projectPathSetting = getExistingSettingPath(config, "projectPath");
-    const makefilePathSetting = getExistingSettingPath(config, "makefilePath");
+    const configuredProjectPath = (config.get("projectPath") || "").trim();
+    const configuredMakefilePath = (config.get("makefilePath") || "").trim();
+    const makefilePathSetting = normalizeMakefileDir(configuredMakefilePath);
     const compilerPathSetting = getExistingSettingPath(config, "compilerPath");
     const openocdPathSetting = getExistingSettingPath(config, "openocdPath");
-    const projectPath = projectPathSetting || workspaceRoot;
-    const makefileDir = makefilePathSetting || (projectPath ? findMakefile(projectPath) || "" : "");
+    const projectPath = configuredProjectPath || workspaceRoot;
+    const projectOk = Boolean(projectPath) && fileExists(projectPath);
+    const makefileDir = makefilePathSetting || (projectOk ? findMakefile(projectPath) || "" : "");
+    const makefilePath = makefileDir ? path.join(makefileDir, "Makefile") : projectPath ? path.join(projectPath, "Makefile") : "";
+    const corePath = projectPath ? path.join(projectPath, "Core") : "";
+    const driversPath = projectPath ? path.join(projectPath, "Drivers") : "";
+    const makefileOk = Boolean(makefilePath) && fileExists(makefilePath);
+    const coreOk = Boolean(corePath) && fileExists(corePath);
+    const driversOk = Boolean(driversPath) && fileExists(driversPath);
     const bundledMake = path.join(context.extensionPath, "resources", "tools", "windows", "make.exe");
     const pathMake = findExecutable(os.platform() === "win32" ? "make.exe" : "make");
     const makePath = os.platform() === "win32"
         ? (fileExists(bundledMake) ? bundledMake : pathMake || "")
         : pathMake || "";
     const makeSource = os.platform() === "win32"
-        ? (fileExists(bundledMake) ? "integre" : pathMake ? "PATH" : "introuvable")
+        ? (fileExists(bundledMake) ? "intégré" : pathMake ? "PATH" : "introuvable")
         : pathMake ? "PATH" : "introuvable";
     const autoCompilerPath = findExecutable(os.platform() === "win32" ? "arm-none-eabi-gcc.exe" : "arm-none-eabi-gcc");
     const compilerPath = compilerPathSetting || autoCompilerPath || "";
@@ -123,8 +200,14 @@ function getQc1Status(context) {
     return {
         projectPath,
         makefileDir,
-        projectOk: Boolean(projectPath) && fileExists(projectPath),
-        makefileOk: Boolean(makefileDir) && fileExists(path.join(makefileDir, "Makefile")),
+        makefilePath,
+        corePath,
+        driversPath,
+        projectOk,
+        projectComplete: projectOk && makefileOk && coreOk && driversOk,
+        makefileOk,
+        coreOk,
+        driversOk,
         makePath,
         makeOk: Boolean(makePath),
         makeSource,
@@ -136,25 +219,44 @@ function getQc1Status(context) {
         openocdSource,
         stFlashPath: stFlashPath || "Not found",
         stFlashOk: Boolean(stFlashPath),
-        stFlashSource
+        stFlashSource,
+        stlinkProbeStatus,
+        stlinkProbeOk: stlinkProbeStatus === "OK"
     };
 }
 function formatDiagnostic(status) {
+    const projectDiagnostic = getProjectDiagnostic(status);
     const lines = [
         "Status outils QC1",
         "",
+        `Diagnostic          ${projectDiagnostic.code} - ${projectDiagnostic.message}`,
+        `Cause               ${projectDiagnostic.cause}`,
+        `Chemin vérifié      ${projectDiagnostic.checkedPath}`,
+        "",
         `Project Folder      ${status.projectOk ? "OK" : "Missing"}`,
-        `Makefile            ${status.makefileOk ? "OK" : "Missing"}`,
-        `Make                ${status.makeOk ? `OK ${status.makeSource}` : "Missing"}`,
+        `Makefile            ${status.makefileOk ? "OK" : "Introuvable"}`,
+        `Core                ${status.coreOk ? "OK" : "Introuvable"}`,
+        `Drivers             ${status.driversOk ? "OK" : "Introuvable"}`,
+        `Make                ${status.makeOk ? `OK ${status.makeSource}` : "Introuvable"}`,
         `ARM GCC             ${status.compilerOk ? `OK ${status.compilerSource}` : "Missing"}`,
         `OpenOCD             ${status.openocdOk ? `OK ${status.openocdSource}` : "Missing"}`,
-        `ST-Flash            ${status.stFlashOk ? `OK ${status.stFlashSource}` : "Missing"}`,
+        `st-flash installé  ${status.stFlashOk ? `OK ${status.stFlashSource}` : "Missing"}`,
+        `Probe ST-Link       ${status.stlinkProbeStatus}`,
         "",
         "Project folder:",
         status.projectPath || "Not found",
         "",
         "Makefile folder:",
         status.makefileDir || "Not found",
+        "",
+        "Makefile path:",
+        status.makefilePath || "Not found",
+        "",
+        "Core folder:",
+        status.corePath || "Not found",
+        "",
+        "Drivers folder:",
+        status.driversPath || "Not found",
         "",
         "Make:",
         status.makePath || "Not found",
@@ -165,10 +267,162 @@ function formatDiagnostic(status) {
         "OpenOCD:",
         status.openocdPath || "Not found",
         "",
-        "ST-Flash:",
+        "st-flash:",
         status.stFlashPath || "Not found"
     ];
     return lines.join("\n");
+}
+function getProjectDiagnostic(status) {
+    if (!status.projectOk) {
+        return {
+            code: "QC1-PATH-001",
+            level: "error",
+            title: "CHEMIN_PROJET_INVALIDE",
+            message: "Chemin projet invalide",
+            cause: "Workspace absent ou chemin configure invalide",
+            checkedPath: status.projectPath || "--"
+        };
+    }
+    if (!status.makefileOk) {
+        return {
+            code: "QC1-PRJ-001",
+            level: "warning",
+            title: "MAKEFILE_INTROUVABLE",
+            message: "Makefile introuvable",
+            cause: "Aucun Makefile trouve dans le projet",
+            checkedPath: status.makefilePath || path.join(status.projectPath, "Makefile")
+        };
+    }
+    if (!status.coreOk) {
+        return {
+            code: "QC1-PRJ-002",
+            level: "warning",
+            title: "CORE_INTROUVABLE",
+            message: "Dossier Core introuvable",
+            cause: "Le dossier Core est absent du projet",
+            checkedPath: status.corePath || path.join(status.projectPath, "Core")
+        };
+    }
+    if (!status.driversOk) {
+        return {
+            code: "QC1-PRJ-003",
+            level: "warning",
+            title: "DRIVERS_INTROUVABLE",
+            message: "Dossier Drivers introuvable",
+            cause: "Le dossier Drivers est absent du projet",
+            checkedPath: status.driversPath || path.join(status.projectPath, "Drivers")
+        };
+    }
+    if (!status.makeOk) {
+        return {
+            code: "QC1-TOOL-001",
+            level: "error",
+            title: "MAKE_INTROUVABLE",
+            message: "make introuvable",
+            cause: "Aucun exécutable make détecté",
+            checkedPath: status.makePath || "PATH"
+        };
+    }
+    return {
+        code: "QC1-OK-001",
+        level: "success",
+        title: "PROJET_OK",
+        message: "Projet OK",
+        cause: "Workspace, Makefile, Core, Drivers et make valides",
+        checkedPath: status.projectPath
+    };
+}
+function getToolDiagnostic(status, command) {
+    if (!status.makeOk && ["make", "build", "clean", "rebuild", "tsmake", "status"].includes(command)) {
+        return {
+            code: "QC1-TOOL-001",
+            level: "error",
+            title: "MAKE_INTROUVABLE",
+            message: "make introuvable",
+            cause: "La commande nécessite make, mais aucun exécutable make n'a été détecté",
+            checkedPath: status.makePath || "PATH"
+        };
+    }
+    if (!status.compilerOk && ["make", "build", "rebuild", "tsmake"].includes(command)) {
+        return {
+            code: "QC1-TOOL-002",
+            level: "error",
+            title: "GCC_ARM_INTROUVABLE",
+            message: "arm-none-eabi-gcc introuvable",
+            cause: "La commande nécessite le compilateur ARM GCC",
+            checkedPath: status.compilerPath || "PATH"
+        };
+    }
+    if (!status.openocdOk && command === "flash") {
+        return {
+            code: "QC1-TOOL-003",
+            level: "error",
+            title: "OPENOCD_INTROUVABLE",
+            message: "OpenOCD introuvable",
+            cause: "La commande flash peut nécessiter OpenOCD",
+            checkedPath: status.openocdPath || "PATH"
+        };
+    }
+    if (!status.stFlashOk && command === "flash") {
+        return {
+            code: "QC1-TOOL-004",
+            level: "error",
+            title: "ST_FLASH_INTROUVABLE",
+            message: "st-flash introuvable",
+            cause: "La commande flash peut nécessiter st-flash",
+            checkedPath: status.stFlashPath || "PATH"
+        };
+    }
+    return undefined;
+}
+function createQc1ErrorFromDiagnostic(diagnostic, command, cwd) {
+    return createQc1Error({
+        code: diagnostic.code,
+        title: diagnostic.title,
+        message: diagnostic.message,
+        cause: diagnostic.cause,
+        command,
+        cwd,
+        path: diagnostic.checkedPath
+    });
+}
+function createQc1ErrorFromProcess(error, command, cwd, stdout, stderr) {
+    if (isTimeoutError(error)) {
+        return createQc1Error({
+            code: "QC1-CMD-002",
+            title: "COMMANDE_EXPIREE",
+            message: "Commande expiree",
+            cause: error?.message || "La commande a depasse le delai permis",
+            command,
+            cwd,
+            exitCode: getExitCode(error),
+            stdout,
+            stderr
+        });
+    }
+    if (error) {
+        return createQc1Error({
+            code: "QC1-CMD-001",
+            title: "COMMANDE_ECHOUEE",
+            message: "Commande échouée",
+            cause: stderr.trim() || error?.message || "La commande QC1 a retourné une erreur",
+            command,
+            cwd,
+            exitCode: getExitCode(error),
+            stdout,
+            stderr
+        });
+    }
+    return createQc1Error({
+        code: "QC1-EXT-001",
+        title: "ERREUR_INTERNE_EXTENSION",
+        message: "Erreur interne extension",
+        cause: "La commande a produit un résultat invalide sans erreur système",
+        command,
+        cwd,
+        stdout,
+        stderr
+    });
 }
 function getQuickCommandPath(context) {
     const config = vscode.workspace.getConfiguration("qc1");
@@ -256,6 +510,7 @@ function stopRuntimeTimer() {
 }
 function syncDashboardState(context) {
     const status = getQc1Status(context);
+    const diagnostic = getProjectDiagnostic(status);
     const projectRoot = status.projectPath || getWorkspaceRoot() || "";
     const buildDir = projectRoot ? path.join(projectRoot, "build") : "";
     const elfPath = buildDir ? path.join(buildDir, "firmware.elf") : "";
@@ -266,18 +521,24 @@ function syncDashboardState(context) {
         ...dashboardState,
         projectName: projectRoot ? path.basename(projectRoot) : "--",
         project: {
-            workspaceOpened: Boolean(getWorkspaceRoot()),
-            projectDetected: status.projectOk,
+            workspaceOpened: status.projectOk,
+            projectDetected: status.projectComplete,
+            projectStatus: !status.projectOk ? "ERREUR" : status.projectComplete ? "OK" : "PARTIEL",
             makefileFound: status.makefileOk,
-            coreFolderFound: Boolean(projectRoot) && fileExists(path.join(projectRoot, "Core")),
-            driversFolderFound: Boolean(projectRoot) && fileExists(path.join(projectRoot, "Drivers")),
+            coreFolderFound: status.coreOk,
+            driversFolderFound: status.driversOk,
             buildFolderFound: Boolean(buildDir) && fileExists(buildDir),
             elfFound: Boolean(elfPath) && fileExists(elfPath),
-            binFound: Boolean(binPath) && fileExists(binPath)
+            binFound: Boolean(binPath) && fileExists(binPath),
+            workspacePath: status.projectPath || "--",
+            makefilePath: status.makefilePath || "--",
+            corePath: status.corePath || "--",
+            driversPath: status.driversPath || "--"
         },
         environment: {
             ...dashboardState.environment,
-            os: process.platform,
+            os: (0, dashboardState_1.getOsLabel)(process.platform),
+            osRaw: process.platform,
             extensionVersion: context.extension.packageJSON.version || dashboardState_1.defaultDashboardState.environment.extensionVersion,
             quickCommandPath,
             makePath: status.makePath || "--",
@@ -285,9 +546,20 @@ function syncDashboardState(context) {
             offlinePortable: quickCommandPath.startsWith(context.extensionPath),
             gccDetected: status.compilerOk,
             openocdDetected: status.openocdOk,
-            stlinkDetected: status.stFlashOk,
+            stlinkDetected: status.stlinkProbeOk,
+            stFlashInstalled: status.stFlashOk,
+            stlinkProbeStatus: status.stlinkProbeStatus,
             makeDetected: status.makeOk,
-            bundledMakeUsed: process.platform === "win32" && status.makeSource === "integre"
+            bundledMakeUsed: process.platform === "win32" && status.makeSource === "intégré"
+        },
+        diagnostic: {
+            ...dashboardState.diagnostic,
+            code: diagnostic.code,
+            level: diagnostic.level,
+            title: diagnostic.title,
+            message: diagnostic.message,
+            cause: diagnostic.cause,
+            checkedPath: diagnostic.checkedPath
         }
     };
 }
@@ -372,7 +644,7 @@ class QC1PanelProvider {
             flashUsage: dashboardState.build.flashUsage || "--",
             ramUsage: dashboardState.build.ramUsage || "--",
             diagnostics: [],
-            explanation: "Aucune erreur connue detectee."
+            explanation: "Aucune erreur connue détectée."
         });
         syncDashboardState(this.context);
         refreshDashboard();
@@ -382,7 +654,8 @@ class QC1PanelProvider {
         const config = vscode.workspace.getConfiguration("qc1");
         return {
             quickCommandPath: getQuickCommandPath(this.context),
-            os: process.platform,
+            os: (0, dashboardState_1.getOsLabel)(process.platform),
+            osRaw: process.platform,
             extensionVersion: this.context.extension.packageJSON.version || dashboardState_1.defaultDashboardState.environment.extensionVersion,
             projectPath: config.get("projectPath", ""),
             makefilePath: config.get("makefilePath", ""),
@@ -392,7 +665,7 @@ class QC1PanelProvider {
             showTimestamps: config.get("showTimestamps", true),
             outputMaxLines: config.get("outputMaxLines", 500),
             compactMode: config.get("compactMode", false),
-            makeSource: getQc1Status(this.context).makeSource === "integre" ? "bundled" : "systeme",
+            makeSource: getQc1Status(this.context).makeSource === "intégré" ? "intégré" : "système",
             makePath: getQc1Status(this.context).makePath || "--",
             bundledMakePath: path.join(this.context.extensionPath, "resources", "tools", "windows", "make.exe"),
             offlinePortable: getQuickCommandPath(this.context).startsWith(this.context.extensionPath)
@@ -411,7 +684,7 @@ class QC1PanelProvider {
         this.sendToolsStatus();
         syncDashboardState(this.context);
         refreshDashboard();
-        this.postStatus("Paths auto-detected", "success");
+        this.postStatus("Chemins détectés", "success");
     }
     async saveLog() {
         const uri = await vscode.window.showSaveDialog({
@@ -431,7 +704,17 @@ class QC1PanelProvider {
         const config = this.getConfig();
         const toolStatus = getQc1Status(this.context);
         if (!root) {
-            this.appendOutput("Aucun workspace ouvert.", "error");
+            const qc1Error = createQc1Error({
+                code: "QC1-PATH-001",
+                title: "CHEMIN_PROJET_INVALIDE",
+                message: "Chemin projet invalide",
+                cause: "Aucun workspace ouvert",
+                command,
+                cwd: "--",
+                path: toolStatus.projectPath || "--"
+            });
+            this.applyQc1Error(qc1Error);
+            this.appendQc1Error(qc1Error, "projet");
             this.postStatus("No workspace", "error");
             return;
         }
@@ -441,8 +724,10 @@ class QC1PanelProvider {
         const quickCommandPath = getQuickCommandPath(this.context);
         const fullCommand = buildQuickCommandExec(quickCommandPath, [command]);
         const makeDir = toolStatus.makefileDir || toolStatus.projectPath || root;
+        const displayedCommand = `qc1 ${command}`;
         this.postStatus(`Running: ${command}`, "running");
-        this.appendOutput(`$ qc1 ${command}`, "command");
+        this.appendOutput(`$ ${displayedCommand}`, "command");
+        this.appendOutput(`CWD: ${makeDir}`, "command");
         syncDashboardState(this.context);
         dashboardState = {
             ...dashboardState,
@@ -454,6 +739,60 @@ class QC1PanelProvider {
         startRuntimeTimer();
         dashboardState = (0, dashboardState_1.updateProgress)(dashboardState, 15, "Validation du projet");
         refreshDashboard();
+        if (!isAllowedQc1Command(command)) {
+            const qc1Error = createQc1Error({
+                code: "QC1-CMD-003",
+                title: "COMMANDE_NON_AUTORISEE",
+                message: "Commande non autorisee",
+                cause: `La commande '${command}' n'est pas autorisee par QC1 STM32 Tools`,
+                command: fullCommand,
+                cwd: makeDir,
+                path: quickCommandPath
+            });
+            dashboardState = {
+                ...dashboardState,
+                progress: {
+                    ...dashboardState.progress,
+                    active: false,
+                    currentStep: qc1Error.message
+                }
+            };
+            stopRuntimeTimer();
+            this.applyQc1Error(qc1Error);
+            this.appendQc1Error(qc1Error, "commande");
+            this.sendQc1ErrorAnalysis(qc1Error);
+            refreshDashboard();
+            this.postStatus(qc1Error.message, "error");
+            this.appendOutput("--- terminé ---", "separator");
+            return;
+        }
+        const projectDiagnostic = getProjectDiagnostic(toolStatus);
+        const toolDiagnostic = getToolDiagnostic(toolStatus, command);
+        const blockingDiagnostic = projectDiagnostic.code === "QC1-OK-001" ? toolDiagnostic : projectDiagnostic;
+        const shouldRunExternalCommand = !blockingDiagnostic;
+        if (!shouldRunExternalCommand) {
+            const qc1Error = createQc1ErrorFromDiagnostic(blockingDiagnostic, fullCommand, makeDir);
+            const blockingLevel = blockingDiagnostic.level === "warning" ? "warning" : "error";
+            dashboardState = {
+                ...dashboardState,
+                currentAction: blockingLevel === "error" ? "Erreur" : "Diagnostic projet",
+                progress: {
+                    ...dashboardState.progress,
+                    active: false,
+                    progressPercent: dashboardState.progress.progressPercent,
+                    currentStep: qc1Error.message
+                }
+            };
+            stopRuntimeTimer();
+            this.applyQc1Error(qc1Error, blockingLevel);
+            this.appendQc1Error(qc1Error, blockingDiagnostic.code.startsWith("QC1-PRJ") ? "projet" : "outil");
+            this.sendQc1ErrorAnalysis(qc1Error, blockingLevel);
+            refreshDashboard();
+            this.sendTerminalMeta();
+            this.postStatus(qc1Error.message, "error");
+            this.appendOutput("--- terminé ---", "separator");
+            return;
+        }
         setTimeout(() => {
             dashboardState = (0, dashboardState_1.updateProgress)(dashboardState, 35, "Execution du script QC1");
             refreshDashboard();
@@ -465,13 +804,16 @@ class QC1PanelProvider {
         (0, child_process_1.exec)(fullCommand, {
             cwd: makeDir,
             env: buildQc1Env(this.context),
-            encoding: "utf8"
+            encoding: "utf8",
+            timeout: 120000
         }, (error, stdout, stderr) => {
-            if (stdout)
-                this.appendOutput(stdout, "stdout");
-            if (stderr)
-                this.appendOutput(stderr, "stderr");
-            const fullOutput = `${stdout ?? ""}\n${stderr ?? ""}`;
+            const stdoutText = stdout ?? "";
+            const stderrText = stderr ?? "";
+            const fullOutput = `${stdoutText}\n${stderrText}`;
+            const detectedProbeStatus = readStlinkProbeStatus(fullOutput);
+            if (detectedProbeStatus !== "non testé") {
+                stlinkProbeStatus = detectedProbeStatus;
+            }
             const parsed = (0, qc1Parser_1.parseQc1Output)(fullOutput);
             const runtimeMs = (dashboardState.progress.runtimeSeconds || 0) * 1000;
             dashboardState = {
@@ -521,24 +863,133 @@ class QC1PanelProvider {
                 parsed.errors === 0 &&
                 !parsed.hasBuildFailed &&
                 !parsed.hasFlashFailed;
+            let commandError;
             if (error) {
-                dashboardState = (0, dashboardState_1.finishProgress)(dashboardState, success, command === "make" ? 202 : command === "flash" ? 203 : 201, command === "make" ? 500 : command === "flash" ? 501 : 504, command === "make" ? "BUILD_SUCCESS" : command === "flash" ? "FLASH_SUCCESS" : "COMMAND_DONE", command === "make" ? "BUILD_FAILED" : command === "flash" ? "FLASH_FAILED" : "EXECUTION_FAILED", success ? `${command} termine` : `${command} echoue`);
+                const qc1Error = createQc1ErrorFromProcess(error, fullCommand, makeDir, stdoutText, stderrText);
+                commandError = qc1Error;
+                dashboardState = (0, dashboardState_1.finishProgress)(dashboardState, success, "QC1-CMD-OK", qc1Error.code, command === "make" ? "BUILD_SUCCESS" : command === "flash" ? "FLASH_SUCCESS" : "COMMAND_DONE", qc1Error.title, success ? `${command} terminé` : qc1Error.message, qc1Error.cause || "La commande QC1 a retourné une erreur", makeDir);
                 refreshDashboard();
                 stopRuntimeTimer();
-                this.appendOutput(`Erreur: ${error.message}`, "error");
+                this.appendQc1Error(qc1Error, "commande");
                 this.postStatus(`Failed: ${command}`, "error");
             }
             else {
-                dashboardState = (0, dashboardState_1.finishProgress)(dashboardState, success, command === "make" ? 202 : command === "flash" ? 203 : 201, command === "make" ? 500 : command === "flash" ? 501 : 504, command === "make" ? "BUILD_SUCCESS" : command === "flash" ? "FLASH_SUCCESS" : "COMMAND_DONE", command === "make" ? "BUILD_FAILED" : command === "flash" ? "FLASH_FAILED" : "EXECUTION_FAILED", success ? `${command} termine` : `${command} echoue`);
+                const failureCause = parsed.explanation || "La commande QC1 a retourné un résultat invalide";
+                const qc1Error = success
+                    ? undefined
+                    : createQc1Error({
+                        code: "QC1-CMD-001",
+                        title: "COMMANDE_ECHOUEE",
+                        message: "Commande échouée",
+                        cause: failureCause,
+                        command: fullCommand,
+                        cwd: makeDir,
+                        exitCode: 0,
+                        stdout: stdoutText,
+                        stderr: stderrText
+                    });
+                commandError = qc1Error;
+                dashboardState = (0, dashboardState_1.finishProgress)(dashboardState, success, "QC1-CMD-OK", qc1Error?.code || "QC1-CMD-001", command === "make" ? "BUILD_SUCCESS" : command === "flash" ? "FLASH_SUCCESS" : "COMMAND_DONE", qc1Error?.title || "COMMANDE_ECHOUEE", success ? `${command} terminé` : qc1Error?.message || "Commande échouée", success ? "Commande terminée sans erreur détectée" : failureCause, makeDir);
                 refreshDashboard();
                 stopRuntimeTimer();
+                if (success) {
+                    this.appendQc1CommandResult(fullCommand, makeDir, 0, stdoutText, stderrText);
+                }
+                else if (qc1Error) {
+                    this.appendQc1Error(qc1Error, "commande");
+                }
                 this.postStatus(success ? `Done: ${command}` : `Failed: ${command}`, success ? "success" : "error");
             }
             syncDashboardState(this.context);
+            if (commandError) {
+                this.applyQc1Error(commandError);
+            }
             refreshDashboard();
             this.sendAnalysis(parsed);
             this.sendTerminalMeta();
-            this.appendOutput("--- termine ---", "separator");
+            this.appendOutput("--- terminé ---", "separator");
+        });
+    }
+    applyQc1Error(qc1Error, level = "error") {
+        dashboardState = {
+            ...dashboardState,
+            currentAction: level === "error" ? "Erreur" : "Diagnostic projet",
+            diagnostic: {
+                code: qc1Error.code,
+                level,
+                title: qc1Error.title,
+                message: qc1Error.message,
+                cause: qc1Error.cause || "--",
+                checkedPath: qc1Error.path || qc1Error.cwd || "--"
+            }
+        };
+    }
+    appendQc1Error(qc1Error, kind) {
+        const header = kind === "projet"
+            ? "[QC1] Erreur projet"
+            : kind === "outil"
+                ? "[QC1] Erreur outil"
+                : kind === "commande"
+                    ? "[QC1] Commande échouée"
+                    : "[QC1] Erreur extension";
+        const lines = [
+            header,
+            `Code    : ${qc1Error.code}`,
+            `Message : ${qc1Error.message}`
+        ];
+        if (qc1Error.command) {
+            lines.push(`Commande: ${qc1Error.command}`);
+        }
+        if (qc1Error.cwd) {
+            lines.push(`CWD     : ${qc1Error.cwd}`);
+        }
+        if (qc1Error.exitCode !== undefined) {
+            lines.push(`Exit    : ${qc1Error.exitCode === null ? "--" : qc1Error.exitCode}`);
+        }
+        if (qc1Error.path) {
+            lines.push(`Chemin  : ${qc1Error.path}`);
+        }
+        if (qc1Error.cause) {
+            lines.push(`Cause   : ${qc1Error.cause}`);
+        }
+        if (qc1Error.stdout !== undefined || qc1Error.stderr !== undefined) {
+            lines.push("", "--- stdout ---", qc1Error.stdout?.trim() || "--", "", "--- stderr ---", qc1Error.stderr?.trim() || "--");
+        }
+        this.appendOutput(lines.join("\n"), "error");
+    }
+    appendQc1CommandResult(command, cwd, exitCode, stdout, stderr) {
+        const lines = [
+            "[QC1] Commande terminée",
+            "Code    : QC1-CMD-OK",
+            "Message : Commande terminée",
+            `Commande: ${command}`,
+            `CWD     : ${cwd}`,
+            `Exit    : ${exitCode === null ? "--" : exitCode}`,
+            "",
+            "--- stdout ---",
+            stdout.trim() || "--",
+            "",
+            "--- stderr ---",
+            stderr.trim() || "--"
+        ];
+        this.appendOutput(lines.join("\n"), "stdout");
+    }
+    sendQc1ErrorAnalysis(qc1Error, level = "error") {
+        this.sendAnalysis({
+            errors: level === "error" ? 1 : 0,
+            warnings: level === "warning" ? 1 : 0,
+            hasBuildFailed: false,
+            hasFlashFailed: false,
+            elfGenerated: dashboardState.build.elfGenerated,
+            binGenerated: dashboardState.build.binGenerated,
+            flashUsage: dashboardState.build.flashUsage || "--",
+            ramUsage: dashboardState.build.ramUsage || "--",
+            diagnostics: [{
+                    severity: level,
+                    message: qc1Error.message,
+                    raw: `${qc1Error.code} ${qc1Error.message}${qc1Error.path ? ` - Chemin: ${qc1Error.path}` : ""}`
+                }],
+            explanation: `${qc1Error.cause || qc1Error.message}${qc1Error.path ? `. Chemin vérifié: ${qc1Error.path}` : ""}`
         });
     }
     appendOutput(text, kind = "stdout") {
@@ -575,7 +1026,7 @@ class QC1PanelProvider {
             flashUsage: "--",
             ramUsage: "--",
             diagnostics: [],
-            explanation: "Aucune erreur connue detectee."
+            explanation: "Aucune erreur connue détectée."
         });
         this.postStatus("Output cleared", "idle");
     }

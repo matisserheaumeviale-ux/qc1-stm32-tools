@@ -6,10 +6,12 @@ export type QC1StatusLevel =
   | "idle";
 
 export interface QC1Diagnostic {
-  code: number;
+  code: string;
   level: QC1StatusLevel;
   title: string;
   message: string;
+  cause: string;
+  checkedPath: string;
 }
 
 export interface QC1TaskProgress {
@@ -51,6 +53,7 @@ export interface QC1ProjectStatus {
   workspaceOpened: boolean;
 
   projectDetected: boolean;
+  projectStatus: "OK" | "PARTIEL" | "ERREUR";
 
   makefileFound: boolean;
 
@@ -60,10 +63,16 @@ export interface QC1ProjectStatus {
 
   elfFound: boolean;
   binFound: boolean;
+
+  workspacePath: string;
+  makefilePath: string;
+  corePath: string;
+  driversPath: string;
 }
 
 export interface QC1EnvironmentStatus {
   os: string;
+  osRaw: NodeJS.Platform;
 
   extensionVersion: string;
   quickCommandPath: string;
@@ -74,6 +83,8 @@ export interface QC1EnvironmentStatus {
   gccDetected: boolean;
   openocdDetected: boolean;
   stlinkDetected: boolean;
+  stFlashInstalled: boolean;
+  stlinkProbeStatus: "OK" | "non détecté" | "non testé";
   makeDetected: boolean;
 
   bundledMakeUsed: boolean;
@@ -97,16 +108,31 @@ export interface DashboardState {
   environment: QC1EnvironmentStatus;
 }
 
+export function getOsLabel(platform: NodeJS.Platform): string {
+  switch (platform) {
+    case "darwin":
+      return "macOS";
+    case "win32":
+      return "Windows";
+    case "linux":
+      return "Linux";
+    default:
+      return platform;
+  }
+}
+
 export const defaultDashboardState: DashboardState = {
   currentAction: "Idle",
   projectName: "--",
   lastCommand: "--",
 
   diagnostic: {
-    code: 300,
+    code: "QC1-IDLE-001",
     level: "idle",
     title: "IDLE",
-    message: "Aucune tâche active"
+    message: "Aucune tâche active",
+    cause: "--",
+    checkedPath: "--"
   },
 
   progress: {
@@ -147,6 +173,7 @@ export const defaultDashboardState: DashboardState = {
     workspaceOpened: false,
 
     projectDetected: false,
+    projectStatus: "ERREUR",
 
     makefileFound: false,
 
@@ -155,13 +182,19 @@ export const defaultDashboardState: DashboardState = {
     buildFolderFound: false,
 
     elfFound: false,
-    binFound: false
+    binFound: false,
+
+    workspacePath: "--",
+    makefilePath: "--",
+    corePath: "--",
+    driversPath: "--"
   },
 
   environment: {
-    os: process.platform,
+    os: getOsLabel(process.platform),
+    osRaw: process.platform,
 
-    extensionVersion: "0.1.2",
+    extensionVersion: "0.1.4",
     quickCommandPath: "quick-command",
     makePath: "--",
     bundledMakePath: "--",
@@ -170,6 +203,8 @@ export const defaultDashboardState: DashboardState = {
     gccDetected: false,
     openocdDetected: false,
     stlinkDetected: false,
+    stFlashInstalled: false,
+    stlinkProbeStatus: "non testé",
     makeDetected: false,
 
     bundledMakeUsed: false
@@ -192,10 +227,12 @@ export function startProgress(
       startedAt: Date.now()
     },
     diagnostic: {
-      code: 301,
+      code: "QC1-CMD-START",
       level: "info",
       title: `${taskName.toUpperCase()}_STARTED`,
-      message: `${taskName} démarré`
+      message: `${taskName} démarré`,
+      cause: "Commande QC1 en cours",
+      checkedPath: "--"
     }
   };
 }
@@ -223,11 +260,13 @@ export function updateProgress(
 export function finishProgress(
   state: DashboardState,
   success: boolean,
-  successCode: number,
-  errorCode: number,
+  successCode: string,
+  errorCode: string,
   successTitle: string,
   errorTitle: string,
-  message: string
+  message: string,
+  cause = success ? "Commande terminée" : "Commande échouée",
+  checkedPath = "--"
 ): DashboardState {
   const startedAt = state.progress.startedAt ?? Date.now();
   const runtimeSeconds = Math.floor((Date.now() - startedAt) / 1000);
@@ -246,7 +285,9 @@ export function finishProgress(
       code: success ? successCode : errorCode,
       level: success ? "success" : "error",
       title: success ? successTitle : errorTitle,
-      message
+      message,
+      cause,
+      checkedPath
     }
   };
 }

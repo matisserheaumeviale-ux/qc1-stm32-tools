@@ -413,7 +413,7 @@ export function getDashboardHtml(state: DashboardState): string {
         QC1 STM32 Tools <span class="version-badge">v${state.environment.extensionVersion}</span>
       </div>
       <div class="hero-subtitle">
-        OS: ${state.environment.os} · Projet: ${state.projectName} · Derniere commande: ${state.lastCommand}
+        OS: ${state.environment.os} · Projet: ${state.projectName} · Dernière commande: ${state.lastCommand}
       </div>
     </section>
 
@@ -453,7 +453,7 @@ export function getDashboardHtml(state: DashboardState): string {
             <div class="card-title">Build</div>
             <div class="big-value">${state.build.lastBuildSuccess ? "OK" : "--"}</div>
             <div class="row"><span class="label">Dernier build</span><span class="value">${state.build.lastBuildTime}</span></div>
-            <div class="row"><span class="label">Duree</span><span class="value">${formatMs(state.build.buildRuntimeMs)}</span></div>
+            <div class="row"><span class="label">Durée</span><span class="value">${formatMs(state.build.buildRuntimeMs)}</span></div>
             <div class="row"><span class="label">Erreurs C</span><span class="value">${state.build.errors}</span></div>
             <div class="row"><span class="label">Warnings C</span><span class="value">${state.build.warnings}</span></div>
           </div>
@@ -462,18 +462,18 @@ export function getDashboardHtml(state: DashboardState): string {
             <div class="card-title">Flash</div>
             <div class="big-value">${state.flash.lastFlashSuccess ? "OK" : "--"}</div>
             <div class="row"><span class="label">Dernier flash</span><span class="value">${state.flash.lastFlashTime}</span></div>
-            <div class="row"><span class="label">Duree</span><span class="value">${formatMs(state.flash.flashRuntimeMs)}</span></div>
-            <div class="row"><span class="label">Methode</span><span class="value">${state.flash.method}</span></div>
+            <div class="row"><span class="label">Durée</span><span class="value">${formatMs(state.flash.flashRuntimeMs)}</span></div>
+            <div class="row"><span class="label">Méthode</span><span class="value">${state.flash.method}</span></div>
             <div class="row"><span class="label">MCU</span><span class="value">${state.flash.targetMCU}</span></div>
           </div>
 
           <div class="card">
             <div class="card-title">Projet</div>
-            <div class="big-value">${state.project.projectDetected ? "OK" : "--"}</div>
-            <div class="row"><span class="label">Workspace</span><span class="value">${statusBadge(state.project.workspaceOpened)}</span></div>
-            <div class="row"><span class="label">Makefile</span><span class="value">${statusBadge(state.project.makefileFound)}</span></div>
-            <div class="row"><span class="label">Core</span><span class="value">${statusBadge(state.project.coreFolderFound)}</span></div>
-            <div class="row"><span class="label">Drivers</span><span class="value">${statusBadge(state.project.driversFolderFound)}</span></div>
+            <div class="big-value">${state.project.projectStatus}</div>
+            <div class="row"><span class="label">Workspace</span><span class="value">${statusBadge(state.project.workspaceOpened, "OK", "erreur")}</span></div>
+            <div class="row"><span class="label">Makefile</span><span class="value">${statusBadge(state.project.makefileFound, "OK", "introuvable")}</span></div>
+            <div class="row"><span class="label">Core</span><span class="value">${statusBadge(state.project.coreFolderFound, "OK", "introuvable")}</span></div>
+            <div class="row"><span class="label">Drivers</span><span class="value">${statusBadge(state.project.driversFolderFound, "OK", "introuvable")}</span></div>
           </div>
         </section>
 
@@ -483,6 +483,8 @@ export function getDashboardHtml(state: DashboardState): string {
             <div class="diag-code">${state.diagnostic.code}</div>
             <div class="diag-title">${state.diagnostic.title}</div>
             <div class="diag-message">${state.diagnostic.message}</div>
+            <div class="row"><span class="label">Cause</span><span class="value">${state.diagnostic.cause}</span></div>
+            <div class="row"><span class="label">Chemin vérifié</span><span class="value mono">${state.diagnostic.checkedPath}</span></div>
           </div>
 
           <div class="card">
@@ -490,7 +492,8 @@ export function getDashboardHtml(state: DashboardState): string {
             <div class="row"><span class="label">make</span><span class="value">${statusBadge(state.environment.makeDetected)}</span></div>
             <div class="row"><span class="label">GCC ARM</span><span class="value">${statusBadge(state.environment.gccDetected)}</span></div>
             <div class="row"><span class="label">OpenOCD</span><span class="value">${statusBadge(state.environment.openocdDetected)}</span></div>
-            <div class="row"><span class="label">ST-Link</span><span class="value">${statusBadge(state.environment.stlinkDetected)}</span></div>
+            <div class="row"><span class="label">st-flash installé</span><span class="value">${statusBadge(state.environment.stFlashInstalled)}</span></div>
+            <div class="row"><span class="label">Probe ST-Link</span><span class="value">${state.environment.stlinkProbeStatus}</span></div>
             <div class="row"><span class="label">Mode portable</span><span class="value">${statusBadge(state.environment.offlinePortable)}</span></div>
           </div>
         </section>
@@ -503,7 +506,7 @@ export function getDashboardHtml(state: DashboardState): string {
           <div class="terminal-title">Terminal QC1</div>
           <div class="terminal-meta">
             <div>Projet: <span id="terminalProject">${state.projectName}</span></div>
-            <div>Derniere commande: <span id="terminalLastCommand">${state.lastCommand}</span></div>
+            <div>Dernière commande: <span id="terminalLastCommand">${state.lastCommand}</span></div>
           </div>
         </section>
 
@@ -518,7 +521,7 @@ export function getDashboardHtml(state: DashboardState): string {
         </section>
 
         <section class="terminal-frame">
-          <div id="output" class="terminal-output">QC1 pret.</div>
+          <div id="output" class="terminal-output">QC1 prêt.</div>
         </section>
 
         <section class="grid-2">
@@ -526,13 +529,13 @@ export function getDashboardHtml(state: DashboardState): string {
             <div class="card-title">Analyse QC1</div>
             <div class="row"><span class="label">Erreurs</span><span id="analysisErrors" class="value">${state.build.errors}</span></div>
             <div class="row"><span class="label">Warnings</span><span id="analysisWarnings" class="value">${state.build.warnings}</span></div>
-            <div class="row"><span class="label">Explication</span><span id="analysisExplanation" class="value">Aucune erreur connue detectee.</span></div>
+            <div class="row"><span class="label">Explication</span><span id="analysisExplanation" class="value">Aucune erreur connue détectée.</span></div>
           </div>
 
           <div class="terminal-frame">
             <div class="card-title">Erreurs connues</div>
             <div id="analysisList" class="analysis-list">
-              <div class="analysis-entry">Aucune sortie analysee pour le moment.</div>
+              <div class="analysis-entry">Aucune sortie analysée pour le moment.</div>
             </div>
           </div>
         </section>
@@ -544,14 +547,14 @@ export function getDashboardHtml(state: DashboardState): string {
         <section class="section-grid">
           <div class="card">
             <div class="card-title">Chemins QC1</div>
-            <div class="row"><span class="label">OS detecte</span><span id="sOs" class="value">${state.environment.os}</span></div>
-            <div class="row"><span class="label">Quick-command utilise</span><span id="sQuickMode" class="value">auto</span></div>
+            <div class="row"><span class="label">OS détecté</span><span id="sOs" class="value">${state.environment.os}</span></div>
+            <div class="row"><span class="label">Quick-command utilisé</span><span id="sQuickMode" class="value">auto</span></div>
             <div id="sPath" class="path-box mono">${state.environment.quickCommandPath}</div>
           </div>
 
           <div class="card">
             <div class="card-title">Toolchain</div>
-            <div class="row"><span class="label">make utilise</span><span id="sMakeSource" class="value">${state.environment.bundledMakeUsed ? "bundled" : "systeme"}</span></div>
+            <div class="row"><span class="label">make utilisé</span><span id="sMakeSource" class="value">${state.environment.bundledMakeUsed ? "intégré" : "système"}</span></div>
             <div class="row"><span class="label">Chemin make</span><span id="sMakePathLabel" class="value">voir ci-dessous</span></div>
             <div id="sMakePath" class="path-box mono">${state.environment.makePath}</div>
             <div class="row"><span class="label">make.exe Windows</span><span id="sBundledMakeLabel" class="value">si applicable</span></div>
@@ -564,8 +567,9 @@ export function getDashboardHtml(state: DashboardState): string {
             <div class="card-title">Flash</div>
             <div class="row"><span class="label">OpenOCD</span><span id="toolOpenocdPathLabel" class="value">--</span></div>
             <div id="toolOpenocdPath" class="path-box mono">--</div>
-            <div class="row"><span class="label">ST-Flash</span><span id="toolStFlashPathLabel" class="value">--</span></div>
+            <div class="row"><span class="label">st-flash installé</span><span id="toolStFlashPathLabel" class="value">--</span></div>
             <div id="toolStFlashPath" class="path-box mono">--</div>
+            <div class="row"><span class="label">Probe ST-Link</span><span id="toolStlinkProbeLabel" class="value">${state.environment.stlinkProbeStatus}</span></div>
           </div>
 
           <div class="card">
@@ -589,7 +593,7 @@ export function getDashboardHtml(state: DashboardState): string {
           <div class="card">
             <div class="card-title">Actions</div>
             <div class="actions">
-              <button onclick="verifyConfig()">Verifier configuration</button>
+              <button onclick="verifyConfig()">Vérifier configuration</button>
               <button class="secondary" onclick="openExtensionFolder()">Ouvrir dossier extension</button>
               <button class="secondary" onclick="openProjectFolder()">Ouvrir dossier projet</button>
               <button class="secondary" onclick="copyDiagnostic()">Copier diagnostic</button>
@@ -645,7 +649,7 @@ export function getDashboardHtml(state: DashboardState): string {
     function appendLines(lines, kind) {
       const output = document.getElementById("output");
 
-      if (output.textContent === "QC1 pret.") {
+      if (output.textContent === "QC1 prêt.") {
         output.textContent = "";
       }
 
@@ -664,7 +668,7 @@ export function getDashboardHtml(state: DashboardState): string {
       document.getElementById("sOs").textContent = settings.os || "--";
       document.getElementById("sVersion").textContent = settings.extensionVersion || "--";
       document.getElementById("sPortable").textContent = settings.offlinePortable ? "Oui" : "Non";
-      document.getElementById("sQuickMode").textContent = settings.quickCommandPath ? "detecte" : "auto";
+      document.getElementById("sQuickMode").textContent = settings.quickCommandPath ? "détecté" : "auto";
       document.getElementById("sMakeSource").textContent = settings.makeSource || "--";
       document.getElementById("sMakePath").textContent = settings.makePath || "--";
       document.getElementById("sBundledMakePath").textContent = settings.bundledMakePath || "--";
@@ -681,6 +685,7 @@ export function getDashboardHtml(state: DashboardState): string {
       document.getElementById("toolOpenocdPath").textContent = tools.openocdPath || "--";
       document.getElementById("toolStFlashPathLabel").textContent = tools.stFlashOk ? "OK" : "introuvable";
       document.getElementById("toolStFlashPath").textContent = tools.stFlashPath || "--";
+      document.getElementById("toolStlinkProbeLabel").textContent = tools.stlinkProbeStatus || "non testé";
     }
 
     function setTerminalMeta(meta) {
@@ -691,7 +696,7 @@ export function getDashboardHtml(state: DashboardState): string {
     function setAnalysis(analysis) {
       document.getElementById("analysisErrors").textContent = String(analysis.errors ?? 0);
       document.getElementById("analysisWarnings").textContent = String(analysis.warnings ?? 0);
-      document.getElementById("analysisExplanation").textContent = analysis.explanation || "Aucune erreur connue detectee.";
+      document.getElementById("analysisExplanation").textContent = analysis.explanation || "Aucune erreur connue détectée.";
 
       const list = document.getElementById("analysisList");
       list.textContent = "";
@@ -701,7 +706,7 @@ export function getDashboardHtml(state: DashboardState): string {
       if (diagnostics.length === 0) {
         const empty = document.createElement("div");
         empty.className = "analysis-entry";
-        empty.textContent = "Aucune sortie analysee pour le moment.";
+        empty.textContent = "Aucune sortie analysée pour le moment.";
         list.appendChild(empty);
         return;
       }
@@ -722,7 +727,7 @@ export function getDashboardHtml(state: DashboardState): string {
       }
 
       if (msg.type === "clearOutput") {
-        document.getElementById("output").textContent = "QC1 pret.";
+        document.getElementById("output").textContent = "QC1 prêt.";
       }
 
       if (msg.type === "settings") {

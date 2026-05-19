@@ -5,6 +5,12 @@ exports.getLiixProvider = getLiixProvider;
 exports.getLiixLocalApiUrl = getLiixLocalApiUrl;
 exports.getLiixLocalApiType = getLiixLocalApiType;
 exports.getLiixLocalModel = getLiixLocalModel;
+exports.getActiveLiixEndpoint = getActiveLiixEndpoint;
+exports.getActiveLiixModel = getActiveLiixModel;
+exports.updateLiixRuntimeConfig = updateLiixRuntimeConfig;
+exports.setActiveLiixModel = setActiveLiixModel;
+exports.getLiixRuntimeConfig = getLiixRuntimeConfig;
+exports.getAvailableLiixModels = getAvailableLiixModels;
 exports.sendLiixChat = sendLiixChat;
 const vscode = require("vscode");
 const aiModels_1 = require("./aiModels");
@@ -27,6 +33,95 @@ function getLiixLocalApiType() {
 }
 function getLiixLocalModel() {
     return vscode.workspace.getConfiguration().get("liix.localModel", "qwen2.5-coder:7b-instruct");
+}
+function getActiveLiixEndpoint() {
+    return getLiixProvider() === "local" ? getLiixLocalApiUrl() : getLiixApiUrl();
+}
+function getActiveLiixModel() {
+    return getLiixProvider() === "local"
+        ? getLiixLocalModel()
+        : vscode.workspace.getConfiguration().get("liix.defaultModel", aiModels_1.liixAiModels[0].id);
+}
+async function updateLiixRuntimeConfig(update) {
+    const config = vscode.workspace.getConfiguration();
+    if (update.provider) {
+        await config.update("liix.provider", update.provider, vscode.ConfigurationTarget.Workspace);
+    }
+    if (update.localApiType) {
+        await config.update("liix.localApiType", update.localApiType, vscode.ConfigurationTarget.Workspace);
+    }
+    if (typeof update.localApiUrl === "string") {
+        await config.update("liix.localApiUrl", update.localApiUrl, vscode.ConfigurationTarget.Workspace);
+    }
+    if (typeof update.localModel === "string") {
+        await config.update("liix.localModel", update.localModel, vscode.ConfigurationTarget.Workspace);
+    }
+    if (typeof update.defaultModel === "string") {
+        await config.update("liix.defaultModel", update.defaultModel, vscode.ConfigurationTarget.Workspace);
+    }
+}
+async function setActiveLiixModel(modelId) {
+    const configKey = getLiixProvider() === "local" ? "liix.localModel" : "liix.defaultModel";
+    await vscode.workspace.getConfiguration().update(configKey, modelId, vscode.ConfigurationTarget.Workspace);
+}
+async function getLiixRuntimeConfig() {
+    const provider = getLiixProvider();
+    const localMode = provider === "local";
+    const models = await getAvailableLiixModels();
+    let model = localMode ? getLiixLocalModel() : vscode.workspace.getConfiguration().get("liix.defaultModel", aiModels_1.liixAiModels[0].id);
+    if (!models.some((item) => item.id === model) && models[0]) {
+        model = models[0].id;
+        await setActiveLiixModel(model);
+    }
+    return {
+        provider,
+        mode: localMode ? "local" : "cloud",
+        endpoint: localMode ? getLiixLocalApiUrl() : getLiixApiUrl(),
+        model,
+        localApiType: getLiixLocalApiType(),
+        localModel: getLiixLocalModel(),
+        models
+    };
+}
+async function getAvailableLiixModels() {
+    const provider = getLiixProvider();
+    if (provider === "liix") {
+        return aiModels_1.liixAiModels.map((model) => ({
+            id: model.id,
+            label: model.label,
+            provider: "liix",
+            source: "liix"
+        }));
+    }
+    const localApiType = getLiixLocalApiType();
+    const localApiUrl = normalizeApiUrl(getLiixLocalApiUrl());
+    try {
+        if (localApiType === "ollama") {
+            return withLocalModelFallback(normalizeOllamaModels(await getJson(`${localApiUrl}/api/tags`, "Local Ollama API")), localApiType);
+        }
+        return withLocalModelFallback(normalizeOpenAiModels(await getJson(`${localApiUrl}/v1/models`, "Local OpenAI-compatible API")), localApiType);
+    }
+    catch {
+        const fallback = getLiixLocalModel();
+        return [{
+                id: fallback,
+                label: fallback,
+                provider: "local",
+                source: localApiType === "ollama" ? "ollama" : "openai-compatible"
+            }];
+    }
+}
+function withLocalModelFallback(models, localApiType) {
+    if (models.length > 0) {
+        return models;
+    }
+    const fallback = getLiixLocalModel();
+    return [{
+            id: fallback,
+            label: fallback,
+            provider: "local",
+            source: localApiType === "ollama" ? "ollama" : "openai-compatible"
+        }];
 }
 async function sendLiixChat(request) {
     const provider = getLiixProvider();
@@ -51,7 +146,7 @@ async function sendLiixChat(request) {
         return normalizeLiixCloudResponse(data);
     }
     if (provider === "local") {
-        return sendLocalLiixChat(message);
+        return sendLocalLiixChat(message, request.model);
     }
     throw new Error(`Invalid Liix provider "${provider}". Expected "liix" or "local".`);
 }
@@ -63,10 +158,10 @@ function getLiixRequestMessage(request) {
         ?.filter((message) => message.role === "user")
         .at(-1)?.content ?? "";
 }
-async function sendLocalLiixChat(message) {
+async function sendLocalLiixChat(message, modelOverride) {
     const localApiType = getLiixLocalApiType();
     const localApiUrl = normalizeApiUrl(getLiixLocalApiUrl());
-    const localModel = getLiixLocalModel();
+    const localModel = modelOverride || getLiixLocalModel();
     if (localApiType === "ollama") {
         console.log("[Liix] POST local Ollama /api/generate", {
             model: localModel,
@@ -135,6 +230,32 @@ async function postJson(url, options) {
         throw new Error(`${options.errorPrefix} returned invalid JSON. ${detail}`);
     }
 }
+async function getJson(url, errorPrefix) {
+    let response;
+    try {
+        response = await fetch(url, {
+            method: "GET",
+            headers: {
+                "Content-Type": "application/json"
+            }
+        });
+    }
+    catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(`${errorPrefix} connection failed. Check that the server is running at ${url}. ${detail}`);
+    }
+    const responseText = await response.text();
+    if (!response.ok) {
+        throw new Error(`${errorPrefix} error: ${response.status} ${response.statusText}${formatResponseSnippet(responseText)}`);
+    }
+    try {
+        return responseText ? JSON.parse(responseText) : {};
+    }
+    catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(`${errorPrefix} returned invalid JSON. ${detail}`);
+    }
+}
 function normalizeApiUrl(apiUrl) {
     return apiUrl.replace(/\/+$/, "");
 }
@@ -185,6 +306,50 @@ function normalizeOpenAiCompatibleResponse(data) {
         usage: response.usage,
         server: response.model
     };
+}
+function normalizeOllamaModels(data) {
+    const response = getObjectResponse(data, "Local Ollama models response is invalid.");
+    const models = response.models;
+    if (!Array.isArray(models)) {
+        return [];
+    }
+    return models
+        .map((model) => {
+        if (!model || typeof model !== "object") {
+            return undefined;
+        }
+        const item = model;
+        const id = typeof item.name === "string" ? item.name : undefined;
+        return id ? {
+            id,
+            label: id,
+            provider: "local",
+            source: "ollama"
+        } : undefined;
+    })
+        .filter((model) => model !== undefined);
+}
+function normalizeOpenAiModels(data) {
+    const response = getObjectResponse(data, "Local OpenAI-compatible models response is invalid.");
+    const models = response.data;
+    if (!Array.isArray(models)) {
+        return [];
+    }
+    return models
+        .map((model) => {
+        if (!model || typeof model !== "object") {
+            return undefined;
+        }
+        const item = model;
+        const id = typeof item.id === "string" ? item.id : undefined;
+        return id ? {
+            id,
+            label: id,
+            provider: "local",
+            source: "openai-compatible"
+        } : undefined;
+    })
+        .filter((model) => model !== undefined);
 }
 function getObjectResponse(data, invalidMessage) {
     if (!data || typeof data !== "object" || Array.isArray(data)) {

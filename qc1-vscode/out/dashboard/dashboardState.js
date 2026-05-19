@@ -1,18 +1,33 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.defaultDashboardState = void 0;
+exports.getOsLabel = getOsLabel;
 exports.startProgress = startProgress;
 exports.updateProgress = updateProgress;
 exports.finishProgress = finishProgress;
+function getOsLabel(platform) {
+    switch (platform) {
+        case "darwin":
+            return "macOS";
+        case "win32":
+            return "Windows";
+        case "linux":
+            return "Linux";
+        default:
+            return platform;
+    }
+}
 exports.defaultDashboardState = {
     currentAction: "Idle",
     projectName: "--",
     lastCommand: "--",
     diagnostic: {
-        code: 300,
+        code: "QC1-IDLE-001",
         level: "idle",
         title: "IDLE",
-        message: "Aucune tâche active"
+        message: "Aucune tâche active",
+        cause: "--",
+        checkedPath: "--"
     },
     progress: {
         active: false,
@@ -42,16 +57,22 @@ exports.defaultDashboardState = {
     project: {
         workspaceOpened: false,
         projectDetected: false,
+        projectStatus: "ERREUR",
         makefileFound: false,
         coreFolderFound: false,
         driversFolderFound: false,
         buildFolderFound: false,
         elfFound: false,
-        binFound: false
+        binFound: false,
+        workspacePath: "--",
+        makefilePath: "--",
+        corePath: "--",
+        driversPath: "--"
     },
     environment: {
-        os: process.platform,
-        extensionVersion: "0.1.2",
+        os: getOsLabel(process.platform),
+        osRaw: process.platform,
+        extensionVersion: "0.1.4",
         quickCommandPath: "quick-command",
         makePath: "--",
         bundledMakePath: "--",
@@ -59,6 +80,8 @@ exports.defaultDashboardState = {
         gccDetected: false,
         openocdDetected: false,
         stlinkDetected: false,
+        stFlashInstalled: false,
+        stlinkProbeStatus: "non testé",
         makeDetected: false,
         bundledMakeUsed: false
     }
@@ -76,10 +99,12 @@ function startProgress(state, taskName, currentStep) {
             startedAt: Date.now()
         },
         diagnostic: {
-            code: 301,
+            code: "QC1-CMD-START",
             level: "info",
             title: `${taskName.toUpperCase()}_STARTED`,
-            message: `${taskName} démarré`
+            message: `${taskName} démarré`,
+            cause: "Commande QC1 en cours",
+            checkedPath: "--"
         }
     };
 }
@@ -97,7 +122,7 @@ function updateProgress(state, progressPercent, currentStep) {
         }
     };
 }
-function finishProgress(state, success, successCode, errorCode, successTitle, errorTitle, message) {
+function finishProgress(state, success, successCode, errorCode, successTitle, errorTitle, message, cause = success ? "Commande terminée" : "Commande échouée", checkedPath = "--") {
     const startedAt = state.progress.startedAt ?? Date.now();
     const runtimeSeconds = Math.floor((Date.now() - startedAt) / 1000);
     return {
@@ -114,7 +139,9 @@ function finishProgress(state, success, successCode, errorCode, successTitle, er
             code: success ? successCode : errorCode,
             level: success ? "success" : "error",
             title: success ? successTitle : errorTitle,
-            message
+            message,
+            cause,
+            checkedPath
         }
     };
 }

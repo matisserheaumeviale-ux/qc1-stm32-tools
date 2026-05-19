@@ -3,14 +3,14 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.parseQc1Output = parseQc1Output;
 function explainDiagnostic(entry) {
     if (!entry) {
-        return "Aucune erreur connue detectee.";
+        return "Aucune erreur connue détectée.";
     }
     const lower = entry.message.toLowerCase();
     if (lower.includes("unused variable")) {
-        return "Variable declaree mais inutilisee. Supprime-la ou utilise-la reellement.";
+        return "Variable déclarée mais inutilisée. Supprime-la ou utilise-la réellement.";
     }
     if (lower.includes("implicit declaration")) {
-        return "Fonction utilisee sans prototype visible. Verifie le include ou le prototype.";
+        return "Fonction utilisée sans prototype visible. Vérifie le include ou le prototype.";
     }
     if (lower.includes("no such file or directory")) {
         return "Fichier introuvable. Verifie le chemin, le include et les fichiers packages.";
@@ -28,9 +28,9 @@ function explainDiagnostic(entry) {
         return "Perte de qualifier const/volatile. Verifie le type de pointeur.";
     }
     if (entry.severity === "warning") {
-        return "Warning GCC a verifier. Souvent type, variable inutilisee ou conversion implicite.";
+        return "Warning GCC à vérifier. Souvent type, variable inutilisée ou conversion implicite.";
     }
-    return "Erreur GCC a verifier. Lis la ligne complete et remonte a la premiere erreur utile.";
+    return "Erreur GCC à vérifier. Lis la ligne complète et remonte à la première erreur utile.";
 }
 function parseDiagnostic(line) {
     const match = line.match(/^(.*?):(\d+):(\d+):\s*(warning|error):\s*(.*)$/i);

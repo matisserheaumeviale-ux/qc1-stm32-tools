@@ -2,5 +2,6 @@
     "qc1.projectPath": "",
     "qc1.makefilePath": "",
     "qc1.compilerPath": "",
-    "qc1.openocdPath": ""
+    "qc1.openocdPath": "",
+    "liix.localModel": "liix-code-mini-0.1:latest"
 }
