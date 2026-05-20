@@ -43,6 +43,8 @@ export interface LiixRuntimeSnapshot {
   workspace: string;
   projectFiles: {
     makefile: boolean;
+    core: boolean;
+    drivers: boolean;
     cmake: boolean;
     packageJson: boolean;
   };
@@ -53,6 +55,26 @@ export interface LiixRuntimeSnapshot {
 
 export function getWorkspaceRoot(): string {
   return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || "";
+}
+
+function findMakefileDir(workspace: string): string {
+  const direct = path.join(workspace, "Makefile");
+  if (fs.existsSync(direct)) return workspace;
+
+  const candidates = [
+    path.join(workspace, "Logiciel", "STM32", "EnCours"),
+    path.join(workspace, "STM32"),
+    path.join(workspace, "Firmware"),
+    path.join(workspace, "firmware"),
+  ];
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(path.join(candidate, "Makefile"))) {
+      return candidate;
+    }
+  }
+
+  return workspace;
 }
 
 export function resolveWorkspacePath(inputPath: string): string {
@@ -220,14 +242,19 @@ export async function runAgentAction(action: LiixAgentAction, mode: LiixAgentMod
 
 export async function inspectRuntimeSnapshot(provider: string, localMode: boolean): Promise<LiixRuntimeSnapshot> {
   const workspace = getWorkspaceRoot();
+  const stm32Dir = workspace ? findMakefileDir(workspace) : "";
   const projectFiles = workspace
     ? {
-        makefile: fs.existsSync(path.join(workspace, "Makefile")),
+        makefile: fs.existsSync(path.join(stm32Dir, "Makefile")),
+        core: fs.existsSync(path.join(stm32Dir, "Core")),
+        drivers: fs.existsSync(path.join(stm32Dir, "Drivers")),
         cmake: fs.existsSync(path.join(workspace, "CMakeLists.txt")),
         packageJson: fs.existsSync(path.join(workspace, "package.json"))
       }
     : {
         makefile: false,
+        core: false,
+        drivers: false,
         cmake: false,
         packageJson: false
       };
@@ -301,7 +328,10 @@ async function runCommandAction(command: string, action: LiixAgentAction, mode: 
     };
   }
 
-  return commandResultToAgentResult(await execCommand(command, getWorkspaceRoot(), 120000), action, "Commande terminal");
+  const workspace = getWorkspaceRoot();
+  const cwd = workspace ? findMakefileDir(workspace) : workspace;
+
+  return commandResultToAgentResult(await execCommand(command, cwd, 120000), action, "Commande terminal");
 }
 
 async function runGitAction(command: string, action: LiixAgentAction, mode: LiixAgentMode): Promise<LiixAgentResult> {
@@ -357,13 +387,15 @@ async function inspectProjectAction(): Promise<LiixAgentResult> {
   }
 
   const entries = await fs.promises.readdir(workspace);
+  const stm32Dir = findMakefileDir(workspace);
   const signals = [
     `Workspace: ${workspace}`,
-    `Makefile: ${fs.existsSync(path.join(workspace, "Makefile")) ? "oui" : "non"}`,
+    `STM32 dir: ${stm32Dir}`,
+    `Makefile: ${fs.existsSync(path.join(stm32Dir, "Makefile")) ? "oui" : "non"}`,
     `CMakeLists.txt: ${fs.existsSync(path.join(workspace, "CMakeLists.txt")) ? "oui" : "non"}`,
     `package.json: ${fs.existsSync(path.join(workspace, "package.json")) ? "oui" : "non"}`,
-    `Core/: ${fs.existsSync(path.join(workspace, "Core")) ? "oui" : "non"}`,
-    `Drivers/: ${fs.existsSync(path.join(workspace, "Drivers")) ? "oui" : "non"}`,
+    `Core/: ${fs.existsSync(path.join(stm32Dir, "Core")) ? "oui" : "non"}`,
+    `Drivers/: ${fs.existsSync(path.join(stm32Dir, "Drivers")) ? "oui" : "non"}`,
     "",
     "Racine:",
     entries.slice(0, 80).join("\n")

@@ -34,36 +34,51 @@ function getWorkspaceRoot(): string | undefined {
 }
 
 function findMakefile(dir: string): string | null {
-  if (!dir || !fileExists(dir)) {
+  const ignoredDirs = new Set([
+    "node_modules",
+    "out",
+    "dist",
+    ".git",
+    ".vscode",
+    "backups",
+    "__pycache__"
+  ]);
+
+  function isValidSTM32MakefileDir(candidate: string): boolean {
+    return (
+      fs.existsSync(path.join(candidate, "Makefile")) &&
+      fs.existsSync(path.join(candidate, "Core")) &&
+      fs.existsSync(path.join(candidate, "Drivers"))
+    );
+  }
+
+  function walk(currentDir: string, depth: number): string | null {
+    if (depth > 8) return null;
+
+    if (isValidSTM32MakefileDir(currentDir)) {
+      return currentDir;
+    }
+
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(currentDir, { withFileTypes: true });
+    } catch {
+      return null;
+    }
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      if (ignoredDirs.has(entry.name)) continue;
+
+      const fullPath = path.join(currentDir, entry.name);
+      const result = walk(fullPath, depth + 1);
+      if (result) return result;
+    }
+
     return null;
   }
 
-  let entries: fs.Dirent[];
-
-  try {
-    entries = fs.readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return null;
-  }
-
-  for (const entry of entries) {
-    const fullPath = path.join(dir, entry.name);
-
-    if (entry.isFile() && entry.name === "Makefile") {
-      return dir;
-    }
-
-    if (entry.isDirectory()) {
-      try {
-        const result = findMakefile(fullPath);
-        if (result) {
-          return result;
-        }
-      } catch {}
-    }
-  }
-
-  return null;
+  return walk(dir, 0);
 }
 
 function getPathCandidates(name: string): string[] {
@@ -255,9 +270,10 @@ function getQc1Status(context: vscode.ExtensionContext): Qc1Status {
   const projectOk = Boolean(projectPath) && fileExists(projectPath);
 
   const makefileDir = makefilePathSetting || (projectOk ? findMakefile(projectPath) || "" : "");
-  const makefilePath = makefileDir ? path.join(makefileDir, "Makefile") : projectPath ? path.join(projectPath, "Makefile") : "";
-  const corePath = projectPath ? path.join(projectPath, "Core") : "";
-  const driversPath = projectPath ? path.join(projectPath, "Drivers") : "";
+  const makefilePath = makefileDir ? path.join(makefileDir, "Makefile") : "";
+  const corePath = makefileDir ? path.join(makefileDir, "Core") : "";
+  const driversPath = makefileDir ? path.join(makefileDir, "Drivers") : "";
+
   const makefileOk = Boolean(makefilePath) && fileExists(makefilePath);
   const coreOk = Boolean(corePath) && fileExists(corePath);
   const driversOk = Boolean(driversPath) && fileExists(driversPath);
@@ -379,7 +395,7 @@ function getProjectDiagnostic(status: Qc1Status): Qc1DiagnosticInfo {
       title: "MAKEFILE_INTROUVABLE",
       message: "Makefile introuvable",
       cause: "Aucun Makefile trouve dans le projet",
-      checkedPath: status.makefilePath || path.join(status.projectPath, "Makefile")
+      checkedPath: status.makefilePath || status.projectPath || "--"
     };
   }
 
@@ -390,7 +406,7 @@ function getProjectDiagnostic(status: Qc1Status): Qc1DiagnosticInfo {
       title: "CORE_INTROUVABLE",
       message: "Dossier Core introuvable",
       cause: "Le dossier Core est absent du projet",
-      checkedPath: status.corePath || path.join(status.projectPath, "Core")
+      checkedPath: status.corePath || (status.makefileDir ? path.join(status.makefileDir, "Core") : status.projectPath || "--")
     };
   }
 
@@ -401,7 +417,7 @@ function getProjectDiagnostic(status: Qc1Status): Qc1DiagnosticInfo {
       title: "DRIVERS_INTROUVABLE",
       message: "Dossier Drivers introuvable",
       cause: "Le dossier Drivers est absent du projet",
-      checkedPath: status.driversPath || path.join(status.projectPath, "Drivers")
+      checkedPath: status.driversPath || (status.makefileDir ? path.join(status.makefileDir, "Drivers") : status.projectPath || "--")
     };
   }
 
@@ -899,7 +915,7 @@ class QC1PanelProvider implements vscode.WebviewViewProvider {
 
     const quickCommandPath = getQuickCommandPath(this.context);
     const fullCommand = buildQuickCommandExec(quickCommandPath, [command]);
-    const makeDir = toolStatus.makefileDir || toolStatus.projectPath || root;
+    const makeDir = toolStatus.makefileDir || root;
     const displayedCommand = `qc1 ${command}`;
 
     this.postStatus(`Running: ${command}`, "running");
