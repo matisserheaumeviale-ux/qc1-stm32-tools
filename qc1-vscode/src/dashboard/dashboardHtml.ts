@@ -441,11 +441,15 @@ export function getDashboardHtml(state: DashboardState): string {
         </section>
 
         <section class="actions">
-          <button onclick="sendCommand('make')">Build</button>
+          <button onclick="sendCommand('build')">Build CMake</button>
           <button onclick="sendCommand('clean')" class="secondary">Clean</button>
           <button onclick="sendCommand('flash')">Flash</button>
           <button onclick="sendCommand('status')" class="secondary">Status</button>
+          <button onclick="sendCommand('detect-stlink')" class="secondary">Detect ST-Link</button>
+          <button onclick="sendCommand('open-serial')" class="secondary">Open Serial</button>
+          <button onclick="sendCommand('start-openocd')" class="secondary">Start OpenOCD</button>
           <button onclick="sendCommand('openLogs')" class="secondary">Open Logs</button>
+          <button onclick="createDiagnosticReport()" class="secondary">Créer un rapport</button>
         </section>
 
         <section class="grid">
@@ -471,9 +475,11 @@ export function getDashboardHtml(state: DashboardState): string {
             <div class="card-title">Projet</div>
             <div class="big-value">${state.project.projectStatus}</div>
             <div class="row"><span class="label">Workspace</span><span class="value">${statusBadge(state.project.workspaceOpened, "OK", "erreur")}</span></div>
-            <div class="row"><span class="label">Makefile</span><span class="value">${statusBadge(state.project.makefileFound, "OK", "introuvable")}</span></div>
-            <div class="row"><span class="label">Core</span><span class="value">${statusBadge(state.project.coreFolderFound, "OK", "introuvable")}</span></div>
-            <div class="row"><span class="label">Drivers</span><span class="value">${statusBadge(state.project.driversFolderFound, "OK", "introuvable")}</span></div>
+            <div class="row"><span class="label">Projet CMake</span><span class="value">${statusBadge(state.project.cmakeProjectReady, "OK", "introuvable")}</span></div>
+            <div class="row"><span class="label">Core (optionnel)</span><span class="value">${statusBadge(state.project.coreFolderFound, "présent", "absent")}</span></div>
+            <div class="row"><span class="label">Drivers (optionnel)</span><span class="value">${statusBadge(state.project.driversFolderFound, "présent", "absent")}</span></div>
+            <div class="row"><span class="label">Startup F103</span><span class="value">${statusBadge(state.project.startupFound, "OK", "introuvable")}</span></div>
+            <div class="row"><span class="label">Linker script</span><span class="value">${statusBadge(state.project.linkerScriptFound, "OK", "introuvable")}</span></div>
           </div>
         </section>
 
@@ -489,7 +495,7 @@ export function getDashboardHtml(state: DashboardState): string {
 
           <div class="card">
             <div class="card-title">Toolchain</div>
-            <div class="row"><span class="label">make</span><span class="value">${statusBadge(state.environment.makeDetected)}</span></div>
+            <div class="row"><span class="label">CMake</span><span class="value">${statusBadge(state.environment.cmakeDetected)}</span></div>
             <div class="row"><span class="label">GCC ARM</span><span class="value">${statusBadge(state.environment.gccDetected)}</span></div>
             <div class="row"><span class="label">OpenOCD</span><span class="value">${statusBadge(state.environment.openocdDetected)}</span></div>
             <div class="row"><span class="label">st-flash installé</span><span class="value">${statusBadge(state.environment.stFlashInstalled)}</span></div>
@@ -511,13 +517,14 @@ export function getDashboardHtml(state: DashboardState): string {
         </section>
 
         <section class="terminal-actions">
-          <button class="terminal-chip" onclick="sendCommand('make')">make</button>
+          <button class="terminal-chip" onclick="sendCommand('build')">cmake build</button>
           <button class="terminal-chip" onclick="sendCommand('clean')">clean</button>
           <button class="terminal-chip" onclick="sendCommand('flash')">flash</button>
           <button class="terminal-chip" onclick="sendCommand('status')">status</button>
           <button class="terminal-chip" onclick="clearTerminal()">clear</button>
           <button class="terminal-chip" onclick="copyOutput()">copy</button>
           <button class="terminal-chip" onclick="saveLog()">save</button>
+          <button class="terminal-chip" onclick="createDiagnosticReport()">rapport</button>
         </section>
 
         <section class="terminal-frame">
@@ -548,17 +555,17 @@ export function getDashboardHtml(state: DashboardState): string {
           <div class="card">
             <div class="card-title">Chemins QC1</div>
             <div class="row"><span class="label">OS détecté</span><span id="sOs" class="value">${state.environment.os}</span></div>
-            <div class="row"><span class="label">Quick-command utilisé</span><span id="sQuickMode" class="value">auto</span></div>
-            <div id="sPath" class="path-box mono">${state.environment.quickCommandPath}</div>
+            <div class="row"><span class="label">Projet CMake</span><span id="sQuickMode" class="value">intégré au VSIX</span></div>
+            <div id="sPath" class="path-box mono">${state.environment.cmakeSourcePath}</div>
           </div>
 
           <div class="card">
             <div class="card-title">Toolchain</div>
-            <div class="row"><span class="label">make utilisé</span><span id="sMakeSource" class="value">${state.environment.bundledMakeUsed ? "intégré" : "système"}</span></div>
-            <div class="row"><span class="label">Chemin make</span><span id="sMakePathLabel" class="value">voir ci-dessous</span></div>
-            <div id="sMakePath" class="path-box mono">${state.environment.makePath}</div>
-            <div class="row"><span class="label">make.exe Windows</span><span id="sBundledMakeLabel" class="value">si applicable</span></div>
-            <div id="sBundledMakePath" class="path-box mono">${state.environment.bundledMakePath}</div>
+            <div class="row"><span class="label">CMake utilisé</span><span id="sCmakeSource" class="value">détecté</span></div>
+            <div class="row"><span class="label">Chemin CMake</span><span id="sCmakePathLabel" class="value">voir ci-dessous</span></div>
+            <div id="sCmakePath" class="path-box mono">${state.environment.cmakePath}</div>
+            <div class="row"><span class="label">Dossier de build</span><span id="sBuildPathLabel" class="value">géré par QC1</span></div>
+            <div id="sBuildPath" class="path-box mono">${state.environment.buildPath}</div>
           </div>
         </section>
 
@@ -586,8 +593,8 @@ export function getDashboardHtml(state: DashboardState): string {
             <div class="card-title">Diagnostics</div>
             <div class="row"><span class="label">Projet</span><span id="toolProjectPathLabel" class="value">--</span></div>
             <div id="toolProjectPath" class="path-box mono">--</div>
-            <div class="row"><span class="label">Makefile</span><span id="toolMakefilePathLabel" class="value">--</span></div>
-            <div id="toolMakefilePath" class="path-box mono">--</div>
+            <div class="row"><span class="label">Projet CMake intégré</span><span id="toolCmakeSourcePathLabel" class="value">--</span></div>
+            <div id="toolCmakeSourcePath" class="path-box mono">--</div>
           </div>
 
           <div class="card">
@@ -597,6 +604,7 @@ export function getDashboardHtml(state: DashboardState): string {
               <button class="secondary" onclick="openExtensionFolder()">Ouvrir dossier extension</button>
               <button class="secondary" onclick="openProjectFolder()">Ouvrir dossier projet</button>
               <button class="secondary" onclick="copyDiagnostic()">Copier diagnostic</button>
+              <button class="secondary" onclick="createDiagnosticReport()">Créer un rapport complet</button>
             </div>
           </div>
         </section>
@@ -628,6 +636,10 @@ export function getDashboardHtml(state: DashboardState): string {
 
     function saveLog() {
       vscode.postMessage({ type: "saveLog" });
+    }
+
+    function createDiagnosticReport() {
+      vscode.postMessage({ type: "createDiagnosticReport" });
     }
 
     function verifyConfig() {
@@ -664,14 +676,14 @@ export function getDashboardHtml(state: DashboardState): string {
     }
 
     function setSettings(settings) {
-      document.getElementById("sPath").textContent = settings.quickCommandPath || "auto";
+      document.getElementById("sPath").textContent = settings.cmakeSourcePath || "--";
       document.getElementById("sOs").textContent = settings.os || "--";
       document.getElementById("sVersion").textContent = settings.extensionVersion || "--";
       document.getElementById("sPortable").textContent = settings.offlinePortable ? "Oui" : "Non";
-      document.getElementById("sQuickMode").textContent = settings.quickCommandPath ? "détecté" : "auto";
-      document.getElementById("sMakeSource").textContent = settings.makeSource || "--";
-      document.getElementById("sMakePath").textContent = settings.makePath || "--";
-      document.getElementById("sBundledMakePath").textContent = settings.bundledMakePath || "--";
+      document.getElementById("sQuickMode").textContent = settings.cmakeMode || "--";
+      document.getElementById("sCmakeSource").textContent = settings.cmakeSource || "--";
+      document.getElementById("sCmakePath").textContent = settings.detectedCmakePath || "--";
+      document.getElementById("sBuildPath").textContent = settings.buildPath || "--";
       document.getElementById("sTimestamps").textContent = String(settings.showTimestamps);
       document.getElementById("sAutoClear").textContent = String(settings.autoClearOutput);
     }
@@ -679,8 +691,8 @@ export function getDashboardHtml(state: DashboardState): string {
     function setToolsStatus(tools) {
       document.getElementById("toolProjectPathLabel").textContent = tools.projectOk ? "OK" : "introuvable";
       document.getElementById("toolProjectPath").textContent = tools.projectPath || "--";
-      document.getElementById("toolMakefilePathLabel").textContent = tools.makefileOk ? "OK" : "introuvable";
-      document.getElementById("toolMakefilePath").textContent = tools.makefileDir || "--";
+      document.getElementById("toolCmakeSourcePathLabel").textContent = tools.cmakeProjectReady ? "OK" : "introuvable";
+      document.getElementById("toolCmakeSourcePath").textContent = tools.cmakeSourcePath || "--";
       document.getElementById("toolOpenocdPathLabel").textContent = tools.openocdOk ? "OK" : "introuvable";
       document.getElementById("toolOpenocdPath").textContent = tools.openocdPath || "--";
       document.getElementById("toolStFlashPathLabel").textContent = tools.stFlashOk ? "OK" : "introuvable";

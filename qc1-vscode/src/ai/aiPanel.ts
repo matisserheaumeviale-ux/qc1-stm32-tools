@@ -1189,7 +1189,7 @@ export class LiixAiPanelProvider implements vscode.WebviewViewProvider {
           </div>
 
           <div class="composer">
-            <textarea id="prompt" placeholder="Demande une analyse, ou lance /project, /errors, /read Core/Src/main.c, /run npm test"></textarea>
+            <textarea id="prompt" placeholder="Demande une analyse, ou lance /project, /errors, /read Src/main.c, /run npm test"></textarea>
             <div class="composer-actions">
               <div id="queueLabel" class="queue-mini">Queue vide</div>
               <button id="readFile" class="ghost">Fichier actif</button>
@@ -1251,7 +1251,7 @@ export class LiixAiPanelProvider implements vscode.WebviewViewProvider {
               <div class="term-line stdout">Terminal Liix prêt.</div>
             </div>
             <div class="composer-actions">
-              <input id="terminalCommand" placeholder="/run make -j4 ou /git status" />
+              <input id="terminalCommand" placeholder="/run cmake --build build/qc1 ou /git status" />
               <button id="retryCommand" class="ghost">Retry</button>
               <button id="runTerminal" class="primary">Run</button>
             </div>

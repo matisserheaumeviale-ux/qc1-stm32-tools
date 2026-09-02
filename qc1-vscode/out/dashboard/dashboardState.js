@@ -58,32 +58,35 @@ exports.defaultDashboardState = {
         workspaceOpened: false,
         projectDetected: false,
         projectStatus: "ERREUR",
-        makefileFound: false,
+        cmakeProjectReady: false,
         coreFolderFound: false,
         driversFolderFound: false,
+        startupFound: false,
+        linkerScriptFound: false,
         buildFolderFound: false,
         elfFound: false,
         binFound: false,
         workspacePath: "--",
-        makefilePath: "--",
+        cmakeSourcePath: "--",
         corePath: "--",
-        driversPath: "--"
+        driversPath: "--",
+        startupPath: "--",
+        linkerScriptPath: "--"
     },
     environment: {
         os: getOsLabel(process.platform),
         osRaw: process.platform,
-        extensionVersion: "0.1.4",
-        quickCommandPath: "quick-command",
-        makePath: "--",
-        bundledMakePath: "--",
-        offlinePortable: false,
+        extensionVersion: "0.3.1",
+        cmakePath: "--",
+        cmakeSourcePath: "--",
+        buildPath: "--",
+        offlinePortable: true,
         gccDetected: false,
         openocdDetected: false,
         stlinkDetected: false,
         stFlashInstalled: false,
         stlinkProbeStatus: "non testé",
-        makeDetected: false,
-        bundledMakeUsed: false
+        cmakeDetected: false
     }
 };
 function startProgress(state, taskName, currentStep) {

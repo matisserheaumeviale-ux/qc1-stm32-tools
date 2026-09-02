@@ -3,6 +3,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
 import { parseBuildLog, summarizeDiagnostics } from "./aiErrorParser";
+import { findStm32Project } from "../qc1/projectDiscovery";
 
 export type LiixAgentMode = "chat" | "agent" | "full";
 export type LiixRisk = "LOW" | "MEDIUM" | "HIGH";
@@ -42,7 +43,6 @@ export interface LiixPermissionRequest {
 export interface LiixRuntimeSnapshot {
   workspace: string;
   projectFiles: {
-    makefile: boolean;
     core: boolean;
     drivers: boolean;
     cmake: boolean;
@@ -57,24 +57,8 @@ export function getWorkspaceRoot(): string {
   return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || "";
 }
 
-function findMakefileDir(workspace: string): string {
-  const direct = path.join(workspace, "Makefile");
-  if (fs.existsSync(direct)) return workspace;
-
-  const candidates = [
-    path.join(workspace, "Logiciel", "STM32", "EnCours"),
-    path.join(workspace, "STM32"),
-    path.join(workspace, "Firmware"),
-    path.join(workspace, "firmware"),
-  ];
-
-  for (const candidate of candidates) {
-    if (fs.existsSync(path.join(candidate, "Makefile"))) {
-      return candidate;
-    }
-  }
-
-  return workspace;
+function findStm32ProjectDir(workspace: string): string {
+  return findStm32Project(workspace)?.root || workspace;
 }
 
 export function resolveWorkspacePath(inputPath: string): string {
@@ -242,17 +226,15 @@ export async function runAgentAction(action: LiixAgentAction, mode: LiixAgentMod
 
 export async function inspectRuntimeSnapshot(provider: string, localMode: boolean): Promise<LiixRuntimeSnapshot> {
   const workspace = getWorkspaceRoot();
-  const stm32Dir = workspace ? findMakefileDir(workspace) : "";
+  const stm32Dir = workspace ? findStm32ProjectDir(workspace) : "";
   const projectFiles = workspace
     ? {
-        makefile: fs.existsSync(path.join(stm32Dir, "Makefile")),
         core: fs.existsSync(path.join(stm32Dir, "Core")),
         drivers: fs.existsSync(path.join(stm32Dir, "Drivers")),
-        cmake: fs.existsSync(path.join(workspace, "CMakeLists.txt")),
+        cmake: true,
         packageJson: fs.existsSync(path.join(workspace, "package.json"))
       }
     : {
-        makefile: false,
         core: false,
         drivers: false,
         cmake: false,
@@ -329,7 +311,7 @@ async function runCommandAction(command: string, action: LiixAgentAction, mode: 
   }
 
   const workspace = getWorkspaceRoot();
-  const cwd = workspace ? findMakefileDir(workspace) : workspace;
+  const cwd = workspace ? findStm32ProjectDir(workspace) : workspace;
 
   return commandResultToAgentResult(await execCommand(command, cwd, 120000), action, "Commande terminal");
 }
@@ -387,12 +369,11 @@ async function inspectProjectAction(): Promise<LiixAgentResult> {
   }
 
   const entries = await fs.promises.readdir(workspace);
-  const stm32Dir = findMakefileDir(workspace);
+  const stm32Dir = findStm32ProjectDir(workspace);
   const signals = [
     `Workspace: ${workspace}`,
     `STM32 dir: ${stm32Dir}`,
-    `Makefile: ${fs.existsSync(path.join(stm32Dir, "Makefile")) ? "oui" : "non"}`,
-    `CMakeLists.txt: ${fs.existsSync(path.join(workspace, "CMakeLists.txt")) ? "oui" : "non"}`,
+    "Projet CMake QC1: intégré à l'extension",
     `package.json: ${fs.existsSync(path.join(workspace, "package.json")) ? "oui" : "non"}`,
     `Core/: ${fs.existsSync(path.join(stm32Dir, "Core")) ? "oui" : "non"}`,
     `Drivers/: ${fs.existsSync(path.join(stm32Dir, "Drivers")) ? "oui" : "non"}`,
@@ -412,7 +393,7 @@ async function inspectProjectAction(): Promise<LiixAgentResult> {
 }
 
 function isLimitedTerminalCommand(command: string): boolean {
-  return /^(npm\s+(run|test|install)|make\b|cmake\b|ls\b|pwd\b|rg\b|grep\b|cat\b|sed\b|bash\s+-n\b)/i.test(command.trim());
+  return /^(npm\s+(run|test|install)|cmake\b|ls\b|pwd\b|rg\b|grep\b|cat\b|sed\b|bash\s+-n\b)/i.test(command.trim());
 }
 
 function execCommand(command: string, cwd: string, timeout: number): Promise<{

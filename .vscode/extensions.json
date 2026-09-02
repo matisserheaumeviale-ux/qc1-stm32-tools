@@ -1,5 +1,8 @@
 {
     "recommendations": [
-        "mistral400.qc1-stm32-tools"
+        "mistral400.qc1-stm32-tools",
+        "ms-vscode.cmake-tools",
+        "mylonics.embedded-build-tools",
+        "marus25.cortex-debug"
     ]
 }

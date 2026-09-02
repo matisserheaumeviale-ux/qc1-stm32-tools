@@ -1,0 +1,15 @@
+{
+    "folders": [
+        {
+            "name": "QC1 CMake",
+            "path": "qc1-vscode/resources/cmake"
+        }
+    ],
+    "extensions": {
+        "recommendations": [
+            "ms-vscode.cmake-tools",
+            "mylonics.embedded-build-tools",
+            "marus25.cortex-debug"
+        ]
+    }
+}

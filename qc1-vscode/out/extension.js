@@ -11,11 +11,35 @@ const dashboardState_1 = require("./dashboard/dashboardState");
 const dashboardHtml_1 = require("./dashboard/dashboardHtml");
 const qc1Parser_1 = require("./qc1/qc1Parser");
 const aiPanel_1 = require("./ai/aiPanel");
+const projectDiscovery_1 = require("./qc1/projectDiscovery");
+const hardware_1 = require("./qc1/hardware");
+const diagnosticReport_1 = require("./qc1/diagnosticReport");
 let dashboardState = dashboardState_1.defaultDashboardState;
 let dashboardPanel;
 let progressTimer;
 let outputChannel;
 let stlinkProbeStatus = "non testé";
+let embeddedCmakePath = "";
+let embeddedGccPath = "";
+let embeddedNinjaPath = "";
+async function initializeEmbeddedBuildTools() {
+    const extension = vscode.extensions.getExtension("mylonics.embedded-build-tools");
+    if (!extension) {
+        return;
+    }
+    try {
+        const api = await extension.activate();
+        if (!await api.ensureToolsInstalled()) {
+            return;
+        }
+        embeddedCmakePath = await api.getCmakePath() || "";
+        embeddedGccPath = await api.getGccPath() || "";
+        embeddedNinjaPath = await api.getNinjaPath() || "";
+    }
+    catch (error) {
+        outputChannel?.appendLine(`[QC1] Outils embarqués indisponibles: ${error.message}`);
+    }
+}
 function fileExists(filePath) {
     try {
         return fs.existsSync(filePath);
@@ -26,48 +50,6 @@ function fileExists(filePath) {
 }
 function getWorkspaceRoot() {
     return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-}
-function findMakefile(dir) {
-    const ignoredDirs = new Set([
-        "node_modules",
-        "out",
-        "dist",
-        ".git",
-        ".vscode",
-        "backups",
-        "__pycache__"
-    ]);
-    function isValidSTM32MakefileDir(candidate) {
-        return (fs.existsSync(path.join(candidate, "Makefile")) &&
-            fs.existsSync(path.join(candidate, "Core")) &&
-            fs.existsSync(path.join(candidate, "Drivers")));
-    }
-    function walk(currentDir, depth) {
-        if (depth > 8)
-            return null;
-        if (isValidSTM32MakefileDir(currentDir)) {
-            return currentDir;
-        }
-        let entries;
-        try {
-            entries = fs.readdirSync(currentDir, { withFileTypes: true });
-        }
-        catch {
-            return null;
-        }
-        for (const entry of entries) {
-            if (!entry.isDirectory())
-                continue;
-            if (ignoredDirs.has(entry.name))
-                continue;
-            const fullPath = path.join(currentDir, entry.name);
-            const result = walk(fullPath, depth + 1);
-            if (result)
-                return result;
-        }
-        return null;
-    }
-    return walk(dir, 0);
 }
 function getPathCandidates(name) {
     const pathValue = process.env.PATH || "";
@@ -109,6 +91,33 @@ function getExistingSettingPath(config, key) {
     const configuredPath = (config.get(key) || "").trim();
     return configuredPath && fileExists(configuredPath) ? configuredPath : "";
 }
+function getExecutableSettingPath(config, key, fallbackName) {
+    const configured = (config.get(key) || "").trim();
+    if (configured) {
+        if (fileExists(configured))
+            return configured;
+        const configuredFromPath = findExecutable(configured);
+        if (configuredFromPath)
+            return configuredFromPath;
+    }
+    return findExecutable(fallbackName) || "";
+}
+function findSerialPort(configuredPort) {
+    if (configuredPort)
+        return configuredPort;
+    if (os.platform() === "win32")
+        return "";
+    const patterns = os.platform() === "darwin"
+        ? [/^cu\.usb/i, /^tty\.usb/i]
+        : [/^ttyACM\d+$/i, /^ttyUSB\d+$/i];
+    try {
+        const device = fs.readdirSync("/dev").sort().find((name) => patterns.some((pattern) => pattern.test(name)));
+        return device ? path.join("/dev", device) : "";
+    }
+    catch {
+        return "";
+    }
+}
 function createQc1Error(input) {
     return {
         code: input.code || "QC1-EXT-001",
@@ -117,7 +126,7 @@ function createQc1Error(input) {
         cause: input.cause,
         command: input.command,
         cwd: input.cwd,
-        exitCode: input.exitCode ?? null,
+        exitCode: input.exitCode,
         stdout: input.stdout,
         stderr: input.stderr,
         path: input.path
@@ -133,7 +142,6 @@ function isTimeoutError(error) {
 }
 function isAllowedQc1Command(command) {
     return [
-        "make",
         "build",
         "clean",
         "rebuild",
@@ -147,84 +155,96 @@ function isAllowedQc1Command(command) {
         "dev"
     ].includes(command);
 }
-function readStlinkProbeStatus(output) {
-    const lower = output.toLowerCase();
-    if (lower.includes("no device found") ||
-        lower.includes("no st-link") ||
-        lower.includes("st-link not found") ||
-        lower.includes("stlink not found") ||
-        lower.includes("unable to connect") ||
-        lower.includes("target voltage")) {
-        return "non détecté";
-    }
-    if (lower.includes("st-link") ||
-        lower.includes("stlink") ||
-        lower.includes("target voltage") ||
-        lower.includes("device connected")) {
-        return "OK";
-    }
-    return "non testé";
-}
-function normalizeMakefileDir(configuredPath) {
-    if (!configuredPath || !fileExists(configuredPath)) {
-        return "";
-    }
-    try {
-        const stat = fs.statSync(configuredPath);
-        return stat.isFile() ? path.dirname(configuredPath) : configuredPath;
-    }
-    catch {
-        return "";
-    }
-}
 function getQc1Status(context) {
     const config = vscode.workspace.getConfiguration("qc1");
     const workspaceRoot = getWorkspaceRoot() || "";
     const configuredProjectPath = (config.get("projectPath") || "").trim();
-    const configuredMakefilePath = (config.get("makefilePath") || "").trim();
-    const makefilePathSetting = normalizeMakefileDir(configuredMakefilePath);
+    const autoDetectProject = config.get("autoDetectProject", true);
+    const configuredCmakePath = getExistingSettingPath(config, "cmakePath");
     const compilerPathSetting = getExistingSettingPath(config, "compilerPath");
     const openocdPathSetting = getExistingSettingPath(config, "openocdPath");
-    const projectPath = configuredProjectPath || workspaceRoot;
-    const projectOk = Boolean(projectPath) && fileExists(projectPath);
-    const makefileDir = makefilePathSetting || (projectOk ? findMakefile(projectPath) || "" : "");
-    const makefilePath = makefileDir ? path.join(makefileDir, "Makefile") : "";
-    const corePath = makefileDir ? path.join(makefileDir, "Core") : "";
-    const driversPath = makefileDir ? path.join(makefileDir, "Drivers") : "";
-    const makefileOk = Boolean(makefilePath) && fileExists(makefilePath);
+    const requestedProjectPath = workspaceRoot
+        ? (0, projectDiscovery_1.resolveConfiguredProjectPath)(configuredProjectPath, workspaceRoot)
+        : configuredProjectPath;
+    const detectedProject = !configuredProjectPath && autoDetectProject && requestedProjectPath && fileExists(requestedProjectPath)
+        ? (0, projectDiscovery_1.findStm32Project)(requestedProjectPath)
+        : null;
+    const projectInspection = detectedProject || (requestedProjectPath
+        ? (0, projectDiscovery_1.inspectStm32Project)(requestedProjectPath)
+        : (0, projectDiscovery_1.inspectStm32Project)(""));
+    const projectPath = projectInspection.root;
+    const projectOk = Boolean(projectPath) && fileExists(projectPath) && projectInspection.layout !== "unknown";
+    const corePath = projectInspection.corePath;
+    const driversPath = projectInspection.driversPath;
+    const sourcePath = projectInspection.srcPath;
+    const startupPath = projectInspection.startupPath;
+    const linkerScriptPath = projectInspection.linkerScriptPath;
     const coreOk = Boolean(corePath) && fileExists(corePath);
     const driversOk = Boolean(driversPath) && fileExists(driversPath);
-    const bundledMake = path.join(context.extensionPath, "resources", "tools", "windows", "make.exe");
-    const pathMake = findExecutable(os.platform() === "win32" ? "make.exe" : "make");
-    const makePath = os.platform() === "win32"
-        ? (fileExists(bundledMake) ? bundledMake : pathMake || "")
-        : pathMake || "";
-    const makeSource = os.platform() === "win32"
-        ? (fileExists(bundledMake) ? "intégré" : pathMake ? "PATH" : "introuvable")
-        : pathMake ? "PATH" : "introuvable";
+    const sourceOk = Boolean(sourcePath) && fileExists(sourcePath);
+    const startupOk = Boolean(startupPath) && fileExists(startupPath);
+    const linkerScriptOk = Boolean(linkerScriptPath) && fileExists(linkerScriptPath);
+    const bundledCmakeSourcePath = path.join(context.extensionPath, "resources", "cmake");
+    const nativeCmakeOk = Boolean(projectInspection.nativeCmakePath) && fileExists(projectInspection.nativeCmakePath);
+    const bundledCmakeReady = fileExists(path.join(bundledCmakeSourcePath, "CMakeLists.txt")) &&
+        fileExists(path.join(bundledCmakeSourcePath, "arm-none-eabi-toolchain.cmake"));
+    const cmakeSourcePath = nativeCmakeOk ? projectPath : bundledCmakeSourcePath;
+    const cmakeProjectReady = nativeCmakeOk || bundledCmakeReady;
+    const buildDirectory = config.get("buildDirectory", "build/qc1").trim() || "build/qc1";
+    const buildPath = projectPath
+        ? (path.isAbsolute(buildDirectory) ? buildDirectory : path.join(projectPath, buildDirectory))
+        : "";
+    const outputName = nativeCmakeOk ? projectInspection.projectName : "firmware";
+    const elfPath = buildPath ? path.join(buildPath, `${outputName}.elf`) : "";
+    const binPath = buildPath ? path.join(buildPath, `${outputName}.bin`) : "";
+    const pathCmake = findExecutable(os.platform() === "win32" ? "cmake.exe" : "cmake");
+    const cmakePath = configuredCmakePath || embeddedCmakePath || pathCmake || "";
+    const cmakeSource = configuredCmakePath ? "setting" : embeddedCmakePath ? "extension" : pathCmake ? "PATH" : "introuvable";
+    const pathNinja = findExecutable(os.platform() === "win32" ? "ninja.exe" : "ninja");
+    const ninjaPath = embeddedNinjaPath || pathNinja || "";
+    const ninjaSource = embeddedNinjaPath ? "extension" : pathNinja ? "PATH" : "introuvable";
     const autoCompilerPath = findExecutable(os.platform() === "win32" ? "arm-none-eabi-gcc.exe" : "arm-none-eabi-gcc");
-    const compilerPath = compilerPathSetting || autoCompilerPath || "";
-    const compilerSource = compilerPathSetting ? "setting" : autoCompilerPath ? "PATH" : "introuvable";
+    const compilerPath = compilerPathSetting || embeddedGccPath || autoCompilerPath || "";
+    const compilerSource = compilerPathSetting ? "setting" : embeddedGccPath ? "extension" : autoCompilerPath ? "PATH" : "introuvable";
     const autoOpenocdPath = findExecutable(os.platform() === "win32" ? "openocd.exe" : "openocd");
     const openocdPath = openocdPathSetting || autoOpenocdPath || "";
     const openocdSource = openocdPathSetting ? "setting" : autoOpenocdPath ? "PATH" : "introuvable";
     const autoStFlashPath = findExecutable(os.platform() === "win32" ? "st-flash.exe" : "st-flash");
     const stFlashPath = autoStFlashPath || "";
     const stFlashSource = autoStFlashPath ? "PATH" : "introuvable";
+    const stlinkPath = getExecutableSettingPath(config, "stlinkPath", os.platform() === "win32" ? "st-info.exe" : "st-info");
+    const serialPort = findSerialPort((config.get("serialPort") || "").trim());
+    const baudRate = config.get("baudRate", 19200);
+    const projectComplete = projectOk && sourceOk && startupOk && linkerScriptOk && cmakeProjectReady;
     return {
         projectPath,
-        makefileDir,
-        makefilePath,
+        projectLayout: projectInspection.layout,
+        projectName: projectInspection.projectName,
+        cmakeSourcePath,
+        buildPath,
+        elfPath,
+        binPath,
         corePath,
         driversPath,
+        sourcePath,
+        startupPath,
+        linkerScriptPath,
         projectOk,
-        projectComplete: projectOk && makefileOk && coreOk && driversOk,
-        makefileOk,
+        projectComplete,
+        cmakeProjectReady,
+        nativeCmakeOk,
+        bundledCmakeReady,
         coreOk,
         driversOk,
-        makePath,
-        makeOk: Boolean(makePath),
-        makeSource,
+        sourceOk,
+        startupOk,
+        linkerScriptOk,
+        cmakePath: cmakePath || "Not found",
+        cmakeOk: Boolean(cmakePath),
+        cmakeSource,
+        ninjaPath: ninjaPath || "Not found",
+        ninjaOk: Boolean(ninjaPath),
+        ninjaSource,
         compilerPath: compilerPath || "Not found",
         compilerOk: Boolean(compilerPath),
         compilerSource,
@@ -234,37 +254,56 @@ function getQc1Status(context) {
         stFlashPath: stFlashPath || "Not found",
         stFlashOk: Boolean(stFlashPath),
         stFlashSource,
+        stlinkPath: stlinkPath || "Not found",
+        stlinkToolOk: Boolean(stlinkPath),
+        serialPort,
+        baudRate,
         stlinkProbeStatus,
         stlinkProbeOk: stlinkProbeStatus === "OK"
     };
 }
 function formatDiagnostic(status) {
-    const projectDiagnostic = getProjectDiagnostic(status);
+    const projectDiagnostics = getProjectDiagnostics(status);
+    const diagnosticLines = projectDiagnostics.length > 0
+        ? projectDiagnostics.map((diagnostic) => `${diagnostic.code} [${diagnostic.level}] ${diagnostic.message} — ${diagnostic.checkedPath}`)
+        : ["QC1-OK-001 [success] Projet OK"];
     const lines = [
         "Status outils QC1",
         "",
-        `Diagnostic          ${projectDiagnostic.code} - ${projectDiagnostic.message}`,
-        `Cause               ${projectDiagnostic.cause}`,
-        `Chemin vérifié      ${projectDiagnostic.checkedPath}`,
+        "Diagnostics projet",
+        ...diagnosticLines,
         "",
         `Project Folder      ${status.projectOk ? "OK" : "Missing"}`,
-        `Makefile            ${status.makefileOk ? "OK" : "Introuvable"}`,
-        `Core                ${status.coreOk ? "OK" : "Introuvable"}`,
-        `Drivers             ${status.driversOk ? "OK" : "Introuvable"}`,
-        `Make                ${status.makeOk ? `OK ${status.makeSource}` : "Introuvable"}`,
+        `Structure           ${status.projectLayout}`,
+        `CMake utilisé       ${status.nativeCmakeOk ? "projet natif" : status.bundledCmakeReady ? "QC1 intégré" : "Introuvable"}`,
+        `Sources             ${status.sourceOk ? "OK" : "Introuvable"}`,
+        `Core                ${status.coreOk ? "OK" : "optionnel/absent"}`,
+        `Drivers             ${status.driversOk ? "OK" : "optionnel/absent"}`,
+        `Startup STM32F103   ${status.startupOk ? "OK" : "Introuvable"}`,
+        `Linker script       ${status.linkerScriptOk ? "OK" : "Introuvable"}`,
+        `CMake               ${status.cmakeOk ? `OK ${status.cmakeSource}` : "Introuvable"}`,
+        `Ninja               ${status.ninjaOk ? `OK ${status.ninjaSource}` : "Introuvable"}`,
         `ARM GCC             ${status.compilerOk ? `OK ${status.compilerSource}` : "Missing"}`,
         `OpenOCD             ${status.openocdOk ? `OK ${status.openocdSource}` : "Missing"}`,
         `st-flash installé  ${status.stFlashOk ? `OK ${status.stFlashSource}` : "Missing"}`,
+        `st-info             ${status.stlinkToolOk ? "OK" : "Missing"}`,
         `Probe ST-Link       ${status.stlinkProbeStatus}`,
+        `Port série          ${status.serialPort || "Non configuré/détecté"}`,
         "",
         "Project folder:",
         status.projectPath || "Not found",
         "",
-        "Makefile folder:",
-        status.makefileDir || "Not found",
+        "CMake source intégré:",
+        status.cmakeSourcePath || "Not found",
         "",
-        "Makefile path:",
-        status.makefilePath || "Not found",
+        "CMake build:",
+        status.buildPath || "Not found",
+        "",
+        "Firmware ELF:",
+        status.elfPath || "Not found",
+        "",
+        "Sources:",
+        status.sourcePath || "Not found",
         "",
         "Core folder:",
         status.corePath || "Not found",
@@ -272,8 +311,17 @@ function formatDiagnostic(status) {
         "Drivers folder:",
         status.driversPath || "Not found",
         "",
-        "Make:",
-        status.makePath || "Not found",
+        "Startup:",
+        status.startupPath || "Not found",
+        "",
+        "Linker script:",
+        status.linkerScriptPath || "Not found",
+        "",
+        "CMake:",
+        status.cmakePath || "Not found",
+        "",
+        "Ninja:",
+        status.ninjaPath || "Not found",
         "",
         "Compiler:",
         status.compilerPath || "Not found",
@@ -282,82 +330,113 @@ function formatDiagnostic(status) {
         status.openocdPath || "Not found",
         "",
         "st-flash:",
-        status.stFlashPath || "Not found"
+        status.stFlashPath || "Not found",
+        "",
+        "st-info:",
+        status.stlinkPath || "Not found"
     ];
     return lines.join("\n");
 }
-function getProjectDiagnostic(status) {
+function getProjectDiagnostics(status) {
+    const diagnostics = [];
     if (!status.projectOk) {
-        return {
+        diagnostics.push({
             code: "QC1-PATH-001",
             level: "error",
             title: "CHEMIN_PROJET_INVALIDE",
-            message: "Chemin projet invalide",
-            cause: "Workspace absent ou chemin configure invalide",
+            message: "Projet STM32 introuvable",
+            cause: "Le chemin ne contient pas un projet STM32 reconnu et l'auto-détection n'a rien trouvé",
             checkedPath: status.projectPath || "--"
-        };
+        });
+        return diagnostics;
     }
-    if (!status.makefileOk) {
-        return {
+    if (!status.cmakeProjectReady) {
+        diagnostics.push({
             code: "QC1-PRJ-001",
-            level: "warning",
-            title: "MAKEFILE_INTROUVABLE",
-            message: "Makefile introuvable",
-            cause: "Aucun Makefile trouve dans le projet",
-            checkedPath: status.makefilePath || status.projectPath || "--"
-        };
+            level: "error",
+            title: "CMAKE_QC1_INTROUVABLE",
+            message: "Projet CMake introuvable",
+            cause: "Ni CMakeLists.txt natif ni projet CMake QC1 intégré utilisable",
+            checkedPath: status.cmakeSourcePath || "--"
+        });
     }
-    if (!status.coreOk) {
-        return {
+    if (!status.sourceOk) {
+        diagnostics.push({
             code: "QC1-PRJ-002",
-            level: "warning",
-            title: "CORE_INTROUVABLE",
-            message: "Dossier Core introuvable",
-            cause: "Le dossier Core est absent du projet",
-            checkedPath: status.corePath || (status.makefileDir ? path.join(status.makefileDir, "Core") : status.projectPath || "--")
-        };
+            level: "error",
+            title: "SOURCES_INTROUVABLES",
+            message: "Dossier de sources introuvable",
+            cause: "QC1 accepte Src/ ou Core/Src/",
+            checkedPath: status.sourcePath || status.projectPath
+        });
     }
-    if (!status.driversOk) {
-        return {
+    if (status.projectLayout === "cubemx" && !status.driversOk) {
+        diagnostics.push({
             code: "QC1-PRJ-003",
             level: "warning",
             title: "DRIVERS_INTROUVABLE",
             message: "Dossier Drivers introuvable",
-            cause: "Le dossier Drivers est absent du projet",
-            checkedPath: status.driversPath || (status.makefileDir ? path.join(status.makefileDir, "Drivers") : status.projectPath || "--")
-        };
+            cause: "Drivers est attendu pour un projet CubeMX, mais reste optionnel en bare-metal",
+            checkedPath: status.driversPath || (status.projectPath ? path.join(status.projectPath, "Drivers") : "--")
+        });
     }
-    if (!status.makeOk) {
-        return {
-            code: "QC1-TOOL-001",
+    if (!status.startupOk) {
+        diagnostics.push({
+            code: "QC1-PRJ-004",
             level: "error",
-            title: "MAKE_INTROUVABLE",
-            message: "make introuvable",
-            cause: "Aucun exécutable make détecté",
-            checkedPath: status.makePath || "PATH"
-        };
+            title: "STARTUP_INTROUVABLE",
+            message: "Startup STM32F103 introuvable",
+            cause: "Le projet doit contenir startup_stm32f103*.s",
+            checkedPath: status.projectPath
+        });
     }
+    if (!status.linkerScriptOk) {
+        diagnostics.push({
+            code: "QC1-PRJ-005",
+            level: "error",
+            title: "LINKER_SCRIPT_INTROUVABLE",
+            message: "Linker script introuvable",
+            cause: "Le projet doit contenir un fichier .ld",
+            checkedPath: status.projectPath
+        });
+    }
+    return diagnostics;
+}
+function getProjectDiagnostic(status) {
+    const diagnostics = getProjectDiagnostics(status);
+    if (diagnostics.length > 0)
+        return diagnostics[0];
     return {
         code: "QC1-OK-001",
         level: "success",
         title: "PROJET_OK",
         message: "Projet OK",
-        cause: "Workspace, Makefile, Core, Drivers et make valides",
+        cause: `Projet ${status.projectLayout}, sources, startup et linker valides`,
         checkedPath: status.projectPath
     };
 }
 function getToolDiagnostic(status, command) {
-    if (!status.makeOk && ["make", "build", "clean", "rebuild", "tsmake", "status"].includes(command)) {
+    if (!status.cmakeOk && ["build", "clean", "rebuild", "tsmake", "flash", "run", "health", "status"].includes(command)) {
         return {
             code: "QC1-TOOL-001",
             level: "error",
-            title: "MAKE_INTROUVABLE",
-            message: "make introuvable",
-            cause: "La commande nécessite make, mais aucun exécutable make n'a été détecté",
-            checkedPath: status.makePath || "PATH"
+            title: "CMAKE_INTROUVABLE",
+            message: "CMake introuvable",
+            cause: "La commande nécessite CMake; configure qc1.cmakePath si CMake n'est pas dans le PATH",
+            checkedPath: status.cmakePath || "PATH"
         };
     }
-    if (!status.compilerOk && ["make", "build", "rebuild", "tsmake"].includes(command)) {
+    if (!status.ninjaOk && ["build", "clean", "rebuild", "tsmake", "flash", "run"].includes(command)) {
+        return {
+            code: "QC1-TOOL-004",
+            level: "error",
+            title: "NINJA_INTROUVABLE",
+            message: "Ninja introuvable",
+            cause: "La chaîne CMake autonome nécessite Ninja fourni par Embedded Build Tools",
+            checkedPath: status.ninjaPath || "PATH"
+        };
+    }
+    if (!status.compilerOk && ["build", "rebuild", "tsmake", "flash", "run"].includes(command)) {
         return {
             code: "QC1-TOOL-002",
             level: "error",
@@ -367,24 +446,14 @@ function getToolDiagnostic(status, command) {
             checkedPath: status.compilerPath || "PATH"
         };
     }
-    if (!status.openocdOk && command === "flash") {
+    if (!status.openocdOk && !status.stFlashOk && ["flash", "run"].includes(command)) {
         return {
             code: "QC1-TOOL-003",
             level: "error",
-            title: "OPENOCD_INTROUVABLE",
-            message: "OpenOCD introuvable",
-            cause: "La commande flash peut nécessiter OpenOCD",
-            checkedPath: status.openocdPath || "PATH"
-        };
-    }
-    if (!status.stFlashOk && command === "flash") {
-        return {
-            code: "QC1-TOOL-004",
-            level: "error",
-            title: "ST_FLASH_INTROUVABLE",
-            message: "st-flash introuvable",
-            cause: "La commande flash peut nécessiter st-flash",
-            checkedPath: status.stFlashPath || "PATH"
+            title: "FLASHER_INTROUVABLE",
+            message: "OpenOCD et st-flash introuvables",
+            cause: "La commande flash nécessite OpenOCD ou st-flash",
+            checkedPath: "PATH"
         };
     }
     return undefined;
@@ -438,67 +507,264 @@ function createQc1ErrorFromProcess(error, command, cwd, stdout, stderr) {
         stderr
     });
 }
-function getQuickCommandPath(context) {
-    const config = vscode.workspace.getConfiguration("qc1");
-    const customPath = config.get("quickCommandPath", "").trim();
-    if (customPath && fileExists(customPath)) {
-        return customPath;
-    }
-    const root = getWorkspaceRoot();
-    if (root) {
-        if (os.platform() === "win32") {
-            const workspaceCmd = path.join(root, "scripts", "quick-command.cmd");
-            const workspacePs1 = path.join(root, "scripts", "quick-command.ps1");
-            if (fileExists(workspaceCmd)) {
-                return workspaceCmd;
-            }
-            if (fileExists(workspacePs1)) {
-                return workspacePs1;
-            }
-        }
-        else {
-            const workspaceScript = path.join(root, "scripts", "quick-command");
-            if (fileExists(workspaceScript)) {
-                return workspaceScript;
-            }
-        }
-    }
-    if (os.platform() === "win32") {
-        const bundledCmd = path.join(context.extensionPath, "resources", "scripts", "quick-command.cmd");
-        const bundledPs1 = path.join(context.extensionPath, "resources", "scripts", "quick-command.ps1");
-        if (fileExists(bundledCmd)) {
-            return bundledCmd;
-        }
-        if (fileExists(bundledPs1)) {
-            return bundledPs1;
-        }
-    }
-    else {
-        const bundledScript = path.join(context.extensionPath, "resources", "scripts", "quick-command");
-        if (fileExists(bundledScript)) {
-            return bundledScript;
-        }
-    }
-    return "quick-command";
-}
 function quoteArg(arg) {
     return `"${arg.replace(/"/g, '\\"')}"`;
 }
-function buildQuickCommandExec(commandPath, args) {
-    const quotedArgs = args.map(quoteArg).join(" ");
-    if (os.platform() === "win32") {
-        if (commandPath.toLowerCase().endsWith(".ps1")) {
-            return `powershell -ExecutionPolicy Bypass -File "${commandPath}" ${quotedArgs}`.trim();
-        }
-        return `cmd /c ""${commandPath}" ${quotedArgs}"`.trim();
-    }
-    return `chmod +x "${commandPath}" && "${commandPath}" ${quotedArgs}`.trim();
+function cmakeDefine(name, value) {
+    return quoteArg(`-D${name}=${value}`);
 }
-function runQuickCommand(context, args) {
-    const terminal = vscode.window.createTerminal("QC1 STM32");
-    const quickCommand = getQuickCommandPath(context);
-    terminal.sendText(buildQuickCommandExec(quickCommand, args));
+function getExecutionEnv(status) {
+    const toolDirectories = [
+        status.cmakeOk ? path.dirname(status.cmakePath) : "",
+        status.ninjaOk ? path.dirname(status.ninjaPath) : "",
+        status.compilerOk ? path.dirname(status.compilerPath) : "",
+        status.openocdOk ? path.dirname(status.openocdPath) : "",
+        status.stFlashOk ? path.dirname(status.stFlashPath) : "",
+        status.stlinkToolOk ? path.dirname(status.stlinkPath) : ""
+    ].filter(Boolean);
+    const currentPath = process.env.PATH || "";
+    return {
+        ...process.env,
+        PATH: [...new Set(toolDirectories), currentPath].filter(Boolean).join(path.delimiter)
+    };
+}
+function runDiagnosticProcess(executable, args, cwd, env) {
+    return new Promise((resolve) => {
+        (0, child_process_1.execFile)(executable, args, {
+            cwd,
+            env,
+            encoding: "utf8",
+            timeout: 8000,
+            maxBuffer: 512 * 1024
+        }, (error, stdout, stderr) => {
+            resolve({
+                exitCode: error ? getExitCode(error) ?? 1 : 0,
+                stdout: stdout || "",
+                stderr: stderr || ""
+            });
+        });
+    });
+}
+function firstMeaningfulLine(output) {
+    return output
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .find(Boolean) || "--";
+}
+async function collectDiagnosticToolReports(status) {
+    const specifications = [
+        { name: "CMake", detected: status.cmakeOk, source: status.cmakeSource, path: status.cmakePath, args: ["--version"] },
+        { name: "Ninja", detected: status.ninjaOk, source: status.ninjaSource, path: status.ninjaPath, args: ["--version"] },
+        { name: "ARM GCC", detected: status.compilerOk, source: status.compilerSource, path: status.compilerPath, args: ["--version"] },
+        { name: "OpenOCD", detected: status.openocdOk, source: status.openocdSource, path: status.openocdPath, args: ["--version"] },
+        { name: "st-flash", detected: status.stFlashOk, source: status.stFlashSource, path: status.stFlashPath, args: ["--version"] },
+        { name: "st-info", detected: status.stlinkToolOk, source: status.stlinkToolOk ? "setting/PATH" : "introuvable", path: status.stlinkPath, args: ["--version"] }
+    ];
+    const environment = getExecutionEnv(status);
+    return Promise.all(specifications.map(async (tool) => {
+        if (!tool.detected) {
+            return { ...tool, version: "--" };
+        }
+        const result = await runDiagnosticProcess(tool.path, tool.args, status.projectPath || undefined, environment);
+        return {
+            name: tool.name,
+            detected: tool.detected,
+            source: tool.source,
+            path: tool.path,
+            version: firstMeaningfulLine(`${result.stdout}\n${result.stderr}`)
+        };
+    }));
+}
+function isPathInside(candidate, root) {
+    if (!candidate || !root)
+        return false;
+    const relative = path.relative(root, candidate);
+    return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+function collectProjectTree(root, maxEntries = 250, maxDepth = 4) {
+    if (!root || !fileExists(root))
+        return "Projet introuvable.";
+    const ignored = new Set([".git", ".vscode", "build", "dist", "node_modules", "out", "__pycache__"]);
+    const lines = ["./"];
+    let truncated = false;
+    function walk(current, depth) {
+        if (depth > maxDepth || lines.length >= maxEntries) {
+            truncated = true;
+            return;
+        }
+        let entries;
+        try {
+            entries = fs.readdirSync(current, { withFileTypes: true })
+                .filter((entry) => !ignored.has(entry.name) && !entry.name.startsWith("."))
+                .sort((left, right) => left.name.localeCompare(right.name));
+        }
+        catch {
+            return;
+        }
+        for (const entry of entries) {
+            if (lines.length >= maxEntries) {
+                truncated = true;
+                return;
+            }
+            const fullPath = path.join(current, entry.name);
+            const relative = path.relative(root, fullPath);
+            lines.push(`${"  ".repeat(depth)}${relative}${entry.isDirectory() ? "/" : ""}`);
+            if (entry.isDirectory() && !entry.isSymbolicLink()) {
+                walk(fullPath, depth + 1);
+            }
+        }
+    }
+    walk(root, 1);
+    if (truncated)
+        lines.push(`... structure limitée à ${maxEntries} entrées et ${maxDepth} niveaux`);
+    return lines.join("\n");
+}
+function collectVsCodeProblems(projectRoot) {
+    const severityLabels = {
+        [vscode.DiagnosticSeverity.Error]: "Erreur",
+        [vscode.DiagnosticSeverity.Warning]: "Avertissement",
+        [vscode.DiagnosticSeverity.Information]: "Information",
+        [vscode.DiagnosticSeverity.Hint]: "Conseil"
+    };
+    const problems = [];
+    let total = 0;
+    for (const [uri, diagnostics] of vscode.languages.getDiagnostics()) {
+        if (uri.scheme !== "file" || (projectRoot && !isPathInside(uri.fsPath, projectRoot)))
+            continue;
+        for (const diagnostic of diagnostics) {
+            total += 1;
+            if (problems.length >= 100)
+                continue;
+            const code = typeof diagnostic.code === "object" ? diagnostic.code.value : diagnostic.code;
+            const location = `${uri.fsPath}:${diagnostic.range.start.line + 1}:${diagnostic.range.start.character + 1}`;
+            const origin = [diagnostic.source, code].filter((value) => value !== undefined && value !== "").join("/");
+            const message = diagnostic.message.replace(/\s+/g, " ").trim();
+            problems.push(`[${severityLabels[diagnostic.severity]}] ${location}${origin ? ` (${origin})` : ""} — ${message}`);
+        }
+    }
+    if (total > problems.length)
+        problems.push(`... ${total - problems.length} problème(s) supplémentaire(s) omis`);
+    return problems;
+}
+async function collectGitSnapshot(projectRoot) {
+    if (!projectRoot)
+        return "Projet introuvable; état Git non disponible.";
+    const inside = await runDiagnosticProcess("git", ["rev-parse", "--is-inside-work-tree"], projectRoot);
+    if (inside.exitCode !== 0 || inside.stdout.trim() !== "true") {
+        return "Dépôt Git non détecté pour ce projet.";
+    }
+    const [head, status] = await Promise.all([
+        runDiagnosticProcess("git", ["log", "-1", "--format=commit: %H%nsubject: %s%nauthor-date: %aI"], projectRoot),
+        runDiagnosticProcess("git", ["status", "--short", "--branch", "--untracked-files=normal", "--", "."], projectRoot)
+    ]);
+    return [
+        head.stdout.trim() || "Commit indisponible.",
+        "",
+        status.stdout.trim() || "Arbre de travail propre."
+    ].join("\n");
+}
+function artifactSnapshot(filePath) {
+    if (!filePath || !fileExists(filePath)) {
+        return { path: filePath || "--", exists: false };
+    }
+    try {
+        const stats = fs.statSync(filePath);
+        return {
+            path: filePath,
+            exists: true,
+            sizeBytes: stats.size,
+            modifiedAt: stats.mtime.toISOString()
+        };
+    }
+    catch (error) {
+        return { path: filePath, exists: true, inspectionError: error.message };
+    }
+}
+function openSerialTerminal(context) {
+    const status = getQc1Status(context);
+    if (!status.serialPort) {
+        vscode.window.showErrorMessage("Aucun port série détecté. Configure qc1.serialPort puis réessaie.");
+        return;
+    }
+    const terminal = vscode.window.createTerminal({
+        name: "QC1 Serial",
+        env: getExecutionEnv(status)
+    });
+    if (os.platform() === "win32") {
+        terminal.sendText(`mode ${quoteArg(status.serialPort)} BAUD=${status.baudRate} PARITY=n DATA=8 STOP=1 && type ${quoteArg(status.serialPort)}`);
+    }
+    else {
+        const screenPath = findExecutable("screen");
+        if (!screenPath) {
+            vscode.window.showErrorMessage("La commande screen est introuvable; installe-la ou utilise un moniteur série VS Code.");
+            terminal.dispose();
+            return;
+        }
+        terminal.sendText(`${quoteArg(screenPath)} ${quoteArg(status.serialPort)} ${status.baudRate}`);
+    }
     terminal.show();
+}
+function startOpenOcdTerminal(context) {
+    const status = getQc1Status(context);
+    if (!status.openocdOk) {
+        vscode.window.showErrorMessage("OpenOCD est introuvable. Configure qc1.openocdPath puis réessaie.");
+        return;
+    }
+    const terminal = vscode.window.createTerminal({
+        name: "QC1 OpenOCD",
+        env: getExecutionEnv(status)
+    });
+    terminal.sendText([quoteArg(status.openocdPath), ...(0, hardware_1.getOpenOcdServerArgs)().map(quoteArg)].join(" "));
+    terminal.show();
+}
+function buildCmakeExec(status, command) {
+    const config = vscode.workspace.getConfiguration("qc1");
+    const buildType = config.get("buildType", "Debug");
+    const cmake = quoteArg(status.cmakePath);
+    const configureParts = [
+        cmake,
+        "-S", quoteArg(status.cmakeSourcePath),
+        "-B", quoteArg(status.buildPath),
+        "-G", quoteArg("Ninja"),
+        cmakeDefine("CMAKE_MAKE_PROGRAM", status.ninjaPath),
+        cmakeDefine("CMAKE_BUILD_TYPE", buildType)
+    ];
+    if (!status.nativeCmakeOk) {
+        const toolchainPath = path.join(status.cmakeSourcePath, "arm-none-eabi-toolchain.cmake");
+        configureParts.push(cmakeDefine("CMAKE_TOOLCHAIN_FILE", toolchainPath), cmakeDefine("QC1_PROJECT_ROOT", status.projectPath), cmakeDefine("QC1_STARTUP", status.startupPath), cmakeDefine("QC1_LINKER_SCRIPT", status.linkerScriptPath));
+        if (status.compilerOk) {
+            configureParts.push(cmakeDefine("QC1_ARM_GCC", status.compilerPath));
+        }
+    }
+    const configure = configureParts.join(" ");
+    const build = `${cmake} --build ${quoteArg(status.buildPath)} --config ${quoteArg(buildType)} --parallel`;
+    const target = (name) => `${cmake} --build ${quoteArg(status.buildPath)} --config ${quoteArg(buildType)} --target ${name}`;
+    const objcopyName = os.platform() === "win32" ? "arm-none-eabi-objcopy.exe" : "arm-none-eabi-objcopy";
+    const objcopyPath = status.compilerOk ? path.join(path.dirname(status.compilerPath), objcopyName) : "";
+    const flash = status.openocdOk
+        ? [quoteArg(status.openocdPath), ...(0, hardware_1.getOpenOcdProgramArgs)(status.elfPath).map(quoteArg)].join(" ")
+        : `${fileExists(objcopyPath) ? `${quoteArg(objcopyPath)} -O binary -S ${quoteArg(status.elfPath)} ${quoteArg(status.binPath)} && ` : ""}${[quoteArg(status.stFlashPath), ...(0, hardware_1.getStFlashWriteArgs)(status.binPath).map(quoteArg)].join(" ")}`;
+    switch (command) {
+        case "clean":
+            return `${configure} && ${target("clean")}`;
+        case "rebuild":
+            return `${configure} && ${target("clean")} && ${build}`;
+        case "flash":
+            return `${configure} && ${build} && ${flash}`;
+        case "run":
+            return `${configure} && ${build} && ${flash}`;
+        case "status":
+        case "health":
+        case "error":
+        case "dev":
+            return quoteArg(status.stlinkPath);
+        case "serial":
+            return "";
+        case "tsmake":
+        case "build":
+        default:
+            return `${configure} && ${build}`;
+    }
 }
 function refreshDashboard() {
     if (dashboardPanel) {
@@ -526,11 +792,9 @@ function syncDashboardState(context) {
     const status = getQc1Status(context);
     const diagnostic = getProjectDiagnostic(status);
     const projectRoot = status.projectPath || getWorkspaceRoot() || "";
-    const buildDir = projectRoot ? path.join(projectRoot, "build") : "";
-    const elfPath = buildDir ? path.join(buildDir, "firmware.elf") : "";
-    const binPath = buildDir ? path.join(buildDir, "firmware.bin") : "";
-    const bundledMakePath = path.join(context.extensionPath, "resources", "tools", "windows", "make.exe");
-    const quickCommandPath = getQuickCommandPath(context);
+    const buildDir = status.buildPath;
+    const elfPath = status.elfPath;
+    const binPath = status.binPath;
     dashboardState = {
         ...dashboardState,
         projectName: projectRoot ? path.basename(projectRoot) : "--",
@@ -538,33 +802,36 @@ function syncDashboardState(context) {
             workspaceOpened: status.projectOk,
             projectDetected: status.projectComplete,
             projectStatus: !status.projectOk ? "ERREUR" : status.projectComplete ? "OK" : "PARTIEL",
-            makefileFound: status.makefileOk,
+            cmakeProjectReady: status.cmakeProjectReady,
             coreFolderFound: status.coreOk,
             driversFolderFound: status.driversOk,
+            startupFound: status.startupOk,
+            linkerScriptFound: status.linkerScriptOk,
             buildFolderFound: Boolean(buildDir) && fileExists(buildDir),
             elfFound: Boolean(elfPath) && fileExists(elfPath),
             binFound: Boolean(binPath) && fileExists(binPath),
             workspacePath: status.projectPath || "--",
-            makefilePath: status.makefilePath || "--",
+            cmakeSourcePath: status.cmakeSourcePath || "--",
             corePath: status.corePath || "--",
-            driversPath: status.driversPath || "--"
+            driversPath: status.driversPath || "--",
+            startupPath: status.startupPath || "--",
+            linkerScriptPath: status.linkerScriptPath || "--"
         },
         environment: {
             ...dashboardState.environment,
             os: (0, dashboardState_1.getOsLabel)(process.platform),
             osRaw: process.platform,
             extensionVersion: context.extension.packageJSON.version || dashboardState_1.defaultDashboardState.environment.extensionVersion,
-            quickCommandPath,
-            makePath: status.makePath || "--",
-            bundledMakePath: fileExists(bundledMakePath) ? bundledMakePath : "--",
-            offlinePortable: quickCommandPath.startsWith(context.extensionPath),
+            cmakePath: status.cmakePath || "--",
+            cmakeSourcePath: status.cmakeSourcePath || "--",
+            buildPath: status.buildPath || "--",
+            offlinePortable: status.cmakeProjectReady,
             gccDetected: status.compilerOk,
             openocdDetected: status.openocdOk,
             stlinkDetected: status.stlinkProbeOk,
             stFlashInstalled: status.stFlashOk,
             stlinkProbeStatus: status.stlinkProbeStatus,
-            makeDetected: status.makeOk,
-            bundledMakeUsed: process.platform === "win32" && status.makeSource === "intégré"
+            cmakeDetected: status.cmakeOk
         },
         diagnostic: {
             ...dashboardState.diagnostic,
@@ -598,14 +865,14 @@ class QC1PanelProvider {
                         outputChannel?.show(true);
                     }
                     else {
-                        this.runQC1(msg.command);
+                        this.runCommand(msg.command);
                     }
                     break;
                 case "run":
-                    this.runQC1(msg.command);
+                    this.runCommand(msg.command);
                     break;
                 case "terminal":
-                    this.runQC1(msg.command);
+                    this.runCommand(msg.command);
                     break;
                 case "clear":
                     this.clearOutput();
@@ -616,6 +883,9 @@ class QC1PanelProvider {
                     break;
                 case "saveLog":
                     await this.saveLog();
+                    break;
+                case "createDiagnosticReport":
+                    await this.createDiagnosticReport();
                     break;
                 case "settings":
                     vscode.commands.executeCommand("workbench.action.openSettings", "@ext:Mistral400.QC1-STM32-Tools");
@@ -637,7 +907,7 @@ class QC1PanelProvider {
                     await vscode.commands.executeCommand("revealFileInOS", vscode.Uri.file(this.context.extensionPath));
                     break;
                 case "openProjectFolder": {
-                    const root = getWorkspaceRoot();
+                    const root = getQc1Status(this.context).projectPath || getWorkspaceRoot();
                     if (root) {
                         await vscode.commands.executeCommand("revealFileInOS", vscode.Uri.file(root));
                     }
@@ -666,23 +936,31 @@ class QC1PanelProvider {
     }
     getConfig() {
         const config = vscode.workspace.getConfiguration("qc1");
+        const status = getQc1Status(this.context);
         return {
-            quickCommandPath: getQuickCommandPath(this.context),
             os: (0, dashboardState_1.getOsLabel)(process.platform),
             osRaw: process.platform,
             extensionVersion: this.context.extension.packageJSON.version || dashboardState_1.defaultDashboardState.environment.extensionVersion,
             projectPath: config.get("projectPath", ""),
-            makefilePath: config.get("makefilePath", ""),
+            cmakePath: config.get("cmakePath", ""),
+            buildDirectory: config.get("buildDirectory", "build/qc1"),
+            buildType: config.get("buildType", "Debug"),
             compilerPath: config.get("compilerPath", ""),
             openocdPath: config.get("openocdPath", ""),
+            serialPort: config.get("serialPort", ""),
+            baudRate: config.get("baudRate", 19200),
+            stlinkPath: config.get("stlinkPath", "st-info"),
+            autoDetectProject: config.get("autoDetectProject", true),
             autoClearOutput: config.get("autoClearOutput", false),
             showTimestamps: config.get("showTimestamps", true),
             outputMaxLines: config.get("outputMaxLines", 500),
             compactMode: config.get("compactMode", false),
-            makeSource: getQc1Status(this.context).makeSource === "intégré" ? "intégré" : "système",
-            makePath: getQc1Status(this.context).makePath || "--",
-            bundledMakePath: path.join(this.context.extensionPath, "resources", "tools", "windows", "make.exe"),
-            offlinePortable: getQuickCommandPath(this.context).startsWith(this.context.extensionPath)
+            cmakeSource: status.cmakeSource,
+            cmakeMode: status.nativeCmakeOk ? "projet natif" : "intégré au VSIX",
+            detectedCmakePath: status.cmakePath || "--",
+            cmakeSourcePath: status.cmakeSourcePath,
+            buildPath: status.buildPath,
+            offlinePortable: status.cmakeProjectReady
         };
     }
     async autoDetectPaths() {
@@ -690,9 +968,13 @@ class QC1PanelProvider {
         const status = getQc1Status(this.context);
         const updates = [];
         updates.push(config.update("projectPath", status.projectOk ? status.projectPath : "", vscode.ConfigurationTarget.Workspace));
-        updates.push(config.update("makefilePath", status.makefileOk ? status.makefileDir : "", vscode.ConfigurationTarget.Workspace));
+        updates.push(config.update("cmakePath", status.cmakeOk && status.cmakeSource === "PATH" ? status.cmakePath : "", vscode.ConfigurationTarget.Workspace));
         updates.push(config.update("compilerPath", status.compilerOk && status.compilerSource === "PATH" ? status.compilerPath : "", vscode.ConfigurationTarget.Workspace));
         updates.push(config.update("openocdPath", status.openocdOk && status.openocdSource === "PATH" ? status.openocdPath : "", vscode.ConfigurationTarget.Workspace));
+        updates.push(config.update("stlinkPath", status.stlinkToolOk ? status.stlinkPath : "st-info", vscode.ConfigurationTarget.Workspace));
+        if (status.serialPort) {
+            updates.push(config.update("serialPort", status.serialPort, vscode.ConfigurationTarget.Workspace));
+        }
         await Promise.all(updates);
         this.sendSettings();
         this.sendToolsStatus();
@@ -712,6 +994,252 @@ class QC1PanelProvider {
         }
         await fs.promises.writeFile(uri.fsPath, this.outputLines.join("\n"), "utf8");
         this.postStatus("Log saved", "success");
+    }
+    async createDiagnosticReport() {
+        const issueDescription = await vscode.window.showInputBox({
+            title: "Rapport de diagnostic QC1",
+            prompt: "Décris brièvement l'erreur et ce que tu faisais lorsqu'elle est apparue.",
+            placeHolder: "Exemple : le build échoue après avoir ajouté un nouveau fichier C (facultatif)",
+            ignoreFocusOut: true
+        });
+        if (issueDescription === undefined)
+            return;
+        try {
+            const report = await vscode.window.withProgress({
+                location: vscode.ProgressLocation.Notification,
+                title: "QC1 : collecte du contexte de diagnostic",
+                cancellable: false
+            }, async (progress) => {
+                progress.report({ message: "Projet, outils et problèmes VS Code" });
+                const status = getQc1Status(this.context);
+                const config = vscode.workspace.getConfiguration("qc1");
+                const workspaceFolders = vscode.workspace.workspaceFolders || [];
+                const projectRoot = status.projectPath || getWorkspaceRoot() || "";
+                const executionEnvironment = getExecutionEnv(status);
+                const probePromise = status.stlinkToolOk
+                    ? runDiagnosticProcess(status.stlinkPath, ["--probe"], projectRoot || undefined, executionEnvironment)
+                    : Promise.resolve({ exitCode: null, stdout: "", stderr: "st-info introuvable" });
+                const [tools, gitSnapshot, probe] = await Promise.all([
+                    collectDiagnosticToolReports(status),
+                    collectGitSnapshot(projectRoot),
+                    probePromise
+                ]);
+                progress.report({ message: "Création et anonymisation du rapport" });
+                const relevantExtension = (id) => {
+                    const extension = vscode.extensions.getExtension(id);
+                    return {
+                        id,
+                        installed: Boolean(extension),
+                        version: extension?.packageJSON?.version || "--",
+                        active: extension?.isActive || false
+                    };
+                };
+                const openDocuments = vscode.workspace.textDocuments
+                    .filter((document) => document.uri.scheme === "file" && (!projectRoot || isPathInside(document.uri.fsPath, projectRoot)))
+                    .slice(0, 30)
+                    .map((document) => ({ path: document.uri.fsPath, dirty: document.isDirty, language: document.languageId }));
+                const projectDiagnostics = getProjectDiagnostics(status);
+                const reportInput = {
+                    generatedAt: new Date().toISOString(),
+                    issueDescription,
+                    extension: {
+                        id: `${this.context.extension.packageJSON.publisher}.${this.context.extension.packageJSON.name}`,
+                        version: this.context.extension.packageJSON.version,
+                        dependencies: [
+                            relevantExtension("ms-vscode.cmake-tools"),
+                            relevantExtension("mylonics.embedded-build-tools")
+                        ]
+                    },
+                    runtime: {
+                        vscodeVersion: vscode.version,
+                        vscodeApp: vscode.env.appName,
+                        vscodeLanguage: vscode.env.language,
+                        remoteName: vscode.env.remoteName || "local",
+                        uiKind: vscode.env.uiKind === vscode.UIKind.Desktop ? "desktop" : "web",
+                        nodeVersion: process.version,
+                        platform: process.platform,
+                        architecture: process.arch,
+                        osRelease: os.release()
+                    },
+                    workspace: {
+                        folders: workspaceFolders.map((folder) => ({ name: folder.name, path: folder.uri.fsPath })),
+                        trusted: vscode.workspace.isTrusted,
+                        openDocuments
+                    },
+                    project: {
+                        path: status.projectPath || "--",
+                        name: status.projectName,
+                        layout: status.projectLayout,
+                        complete: status.projectComplete,
+                        cmakeMode: status.nativeCmakeOk ? "native" : status.bundledCmakeReady ? "QC1 intégré" : "introuvable",
+                        cmakeSourcePath: status.cmakeSourcePath,
+                        sourcePath: status.sourcePath,
+                        corePath: status.corePath,
+                        driversPath: status.driversPath,
+                        startupPath: status.startupPath,
+                        linkerScriptPath: status.linkerScriptPath,
+                        diagnostics: projectDiagnostics
+                    },
+                    configuration: {
+                        projectPath: config.get("projectPath", ""),
+                        buildDirectory: config.get("buildDirectory", "build/qc1"),
+                        buildType: config.get("buildType", "Debug"),
+                        cmakePath: config.get("cmakePath", ""),
+                        compilerPath: config.get("compilerPath", ""),
+                        openocdPath: config.get("openocdPath", ""),
+                        stlinkPath: config.get("stlinkPath", "st-info"),
+                        serialPort: config.get("serialPort", ""),
+                        baudRate: config.get("baudRate", 19200),
+                        autoDetectProject: config.get("autoDetectProject", true),
+                        autoClearOutput: config.get("autoClearOutput", false),
+                        showTimestamps: config.get("showTimestamps", true),
+                        outputMaxLines: config.get("outputMaxLines", 500)
+                    },
+                    dashboard: {
+                        currentAction: dashboardState.currentAction,
+                        lastCommand: dashboardState.lastCommand,
+                        diagnostic: dashboardState.diagnostic,
+                        progress: dashboardState.progress,
+                        build: dashboardState.build,
+                        flash: dashboardState.flash
+                    },
+                    artifacts: {
+                        buildDirectory: artifactSnapshot(status.buildPath),
+                        elf: artifactSnapshot(status.elfPath),
+                        bin: artifactSnapshot(status.binPath)
+                    },
+                    hardware: {
+                        serialPort: status.serialPort || "non configuré/détecté",
+                        baudRate: status.baudRate,
+                        previousStlinkState: status.stlinkProbeStatus,
+                        currentProbeExitCode: probe.exitCode,
+                        currentProbeOutput: `${probe.stdout}\n${probe.stderr}`.trim() || "--"
+                    },
+                    tools,
+                    vscodeProblems: collectVsCodeProblems(projectRoot),
+                    gitSnapshot,
+                    projectTree: collectProjectTree(projectRoot),
+                    logs: this.outputLines.slice(-1000).join("\n") || "Aucun journal QC1 disponible."
+                };
+                const redactions = [
+                    { value: status.projectPath, replacement: "<PROJECT>" },
+                    ...workspaceFolders.map((folder) => ({ value: folder.uri.fsPath, replacement: "<WORKSPACE>" })),
+                    { value: this.context.extensionPath, replacement: "<EXTENSION>" },
+                    { value: os.homedir(), replacement: "<HOME>" }
+                ];
+                return (0, diagnosticReport_1.buildDiagnosticReport)(reportInput, redactions);
+            });
+            const preview = await vscode.workspace.openTextDocument({ content: report, language: "markdown" });
+            await vscode.window.showTextDocument(preview, { preview: true });
+            const action = await vscode.window.showInformationMessage("Rapport QC1 généré et prévisualisé. Vérifie-le avant de l'envoyer.", "Enregistrer le rapport", "Copier le rapport");
+            if (action === "Copier le rapport") {
+                await vscode.env.clipboard.writeText(report);
+                this.postStatus("Rapport copié", "success");
+                return;
+            }
+            if (action === "Enregistrer le rapport") {
+                const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+                const defaultRoot = getQc1Status(this.context).projectPath || getWorkspaceRoot() || this.context.extensionPath;
+                const uri = await vscode.window.showSaveDialog({
+                    defaultUri: vscode.Uri.file(path.join(defaultRoot, `qc1-diagnostic-${timestamp}.md`)),
+                    filters: { Markdown: ["md"], Text: ["txt"] },
+                    saveLabel: "Enregistrer le rapport QC1"
+                });
+                if (uri) {
+                    await vscode.workspace.fs.writeFile(uri, Buffer.from(report, "utf8"));
+                    const savedDocument = await vscode.workspace.openTextDocument(uri);
+                    await vscode.window.showTextDocument(savedDocument, { preview: false });
+                    this.postStatus("Rapport enregistré", "success");
+                }
+            }
+        }
+        catch (error) {
+            const message = `Impossible de générer le rapport QC1 : ${error.message}`;
+            outputChannel?.appendLine(`[QC1] ${message}`);
+            vscode.window.showErrorMessage(message);
+            this.postStatus("Échec du rapport", "error");
+        }
+    }
+    runCommand(command) {
+        if (command === "detect-stlink") {
+            this.detectStlink();
+            return;
+        }
+        if (command === "open-serial") {
+            this.openSerial();
+            return;
+        }
+        if (command === "start-openocd") {
+            this.startOpenOcd();
+            return;
+        }
+        if (["status", "health", "error", "dev"].includes(command)) {
+            this.runStatus(command);
+            return;
+        }
+        if (command === "serial") {
+            openSerialTerminal(this.context);
+            return;
+        }
+        this.runQC1(command);
+    }
+    detectStlink() {
+        this.runStatus("detect-stlink");
+    }
+    openSerial() {
+        openSerialTerminal(this.context);
+    }
+    startOpenOcd() {
+        startOpenOcdTerminal(this.context);
+    }
+    runStatus(command) {
+        const status = getQc1Status(this.context);
+        const config = this.getConfig();
+        const cwd = status.projectPath || getWorkspaceRoot() || "--";
+        if (config.autoClearOutput)
+            this.clearOutput();
+        this.appendOutput(`$ qc1 ${command}`, "command");
+        this.appendOutput(`CWD: ${cwd}`, "command");
+        dashboardState = {
+            ...dashboardState,
+            lastCommand: command,
+            currentAction: command === "detect-stlink" ? "Détection ST-Link" : "Diagnostic"
+        };
+        const finish = (probeOutput, probeError) => {
+            if (status.stlinkToolOk) {
+                const detected = (0, hardware_1.readStlinkProbeStatus)(probeOutput);
+                stlinkProbeStatus = detected === "non testé" && probeError ? "non détecté" : detected;
+            }
+            syncDashboardState(this.context);
+            this.appendOutput(formatDiagnostic(getQc1Status(this.context)), "stdout");
+            if (status.stlinkToolOk) {
+                this.appendOutput([
+                    "",
+                    "Probe ST-Link",
+                    `Commande: ${quoteArg(status.stlinkPath)} --probe`,
+                    `Exit    : ${probeError ? getExitCode(probeError) ?? 1 : 0}`,
+                    probeOutput.trim() || "--"
+                ].join("\n"), probeError ? "error" : "stdout");
+            }
+            else {
+                this.appendOutput("Probe ST-Link non exécuté: st-info introuvable", "error");
+            }
+            refreshDashboard();
+            this.sendToolsStatus();
+            this.sendTerminalMeta();
+            this.postStatus(command === "detect-stlink" ? `ST-Link: ${stlinkProbeStatus}` : "Status terminé", probeError ? "error" : "success");
+            this.appendOutput("--- terminé ---", "separator");
+        };
+        if (!status.stlinkToolOk) {
+            finish("");
+            return;
+        }
+        (0, child_process_1.execFile)(status.stlinkPath, ["--probe"], {
+            cwd: status.projectPath || getWorkspaceRoot(),
+            env: getExecutionEnv(status),
+            encoding: "utf8",
+            timeout: 15000
+        }, (error, stdout, stderr) => finish(`${stdout || ""}\n${stderr || ""}`, error || undefined));
     }
     runQC1(command) {
         const root = getWorkspaceRoot();
@@ -735,13 +1263,11 @@ class QC1PanelProvider {
         if (config.autoClearOutput) {
             this.clearOutput();
         }
-        const quickCommandPath = getQuickCommandPath(this.context);
-        const fullCommand = buildQuickCommandExec(quickCommandPath, [command]);
-        const makeDir = toolStatus.makefileDir || root;
+        const projectDir = toolStatus.projectPath || root;
         const displayedCommand = `qc1 ${command}`;
         this.postStatus(`Running: ${command}`, "running");
         this.appendOutput(`$ ${displayedCommand}`, "command");
-        this.appendOutput(`CWD: ${makeDir}`, "command");
+        this.appendOutput(`CWD: ${projectDir}`, "command");
         syncDashboardState(this.context);
         dashboardState = {
             ...dashboardState,
@@ -759,9 +1285,9 @@ class QC1PanelProvider {
                 title: "COMMANDE_NON_AUTORISEE",
                 message: "Commande non autorisee",
                 cause: `La commande '${command}' n'est pas autorisee par QC1 STM32 Tools`,
-                command: fullCommand,
-                cwd: makeDir,
-                path: quickCommandPath
+                command: displayedCommand,
+                cwd: projectDir,
+                path: toolStatus.cmakeSourcePath
             });
             dashboardState = {
                 ...dashboardState,
@@ -780,12 +1306,11 @@ class QC1PanelProvider {
             this.appendOutput("--- terminé ---", "separator");
             return;
         }
-        const projectDiagnostic = getProjectDiagnostic(toolStatus);
+        const projectDiagnostic = getProjectDiagnostics(toolStatus).find((diagnostic) => diagnostic.level === "error");
         const toolDiagnostic = getToolDiagnostic(toolStatus, command);
-        const blockingDiagnostic = projectDiagnostic.code === "QC1-OK-001" ? toolDiagnostic : projectDiagnostic;
-        const shouldRunExternalCommand = !blockingDiagnostic;
-        if (!shouldRunExternalCommand) {
-            const qc1Error = createQc1ErrorFromDiagnostic(blockingDiagnostic, fullCommand, makeDir);
+        const blockingDiagnostic = projectDiagnostic || toolDiagnostic;
+        if (blockingDiagnostic) {
+            const qc1Error = createQc1ErrorFromDiagnostic(blockingDiagnostic, displayedCommand, projectDir);
             const blockingLevel = blockingDiagnostic.level === "warning" ? "warning" : "error";
             dashboardState = {
                 ...dashboardState,
@@ -807,6 +1332,7 @@ class QC1PanelProvider {
             this.appendOutput("--- terminé ---", "separator");
             return;
         }
+        const fullCommand = buildCmakeExec(toolStatus, command);
         setTimeout(() => {
             dashboardState = (0, dashboardState_1.updateProgress)(dashboardState, 35, "Execution du script QC1");
             refreshDashboard();
@@ -816,15 +1342,15 @@ class QC1PanelProvider {
             refreshDashboard();
         }, 1500);
         (0, child_process_1.exec)(fullCommand, {
-            cwd: makeDir,
-            env: buildQc1Env(this.context),
+            cwd: projectDir,
+            env: getExecutionEnv(toolStatus),
             encoding: "utf8",
             timeout: 120000
         }, (error, stdout, stderr) => {
             const stdoutText = stdout ?? "";
             const stderrText = stderr ?? "";
             const fullOutput = `${stdoutText}\n${stderrText}`;
-            const detectedProbeStatus = readStlinkProbeStatus(fullOutput);
+            const detectedProbeStatus = (0, hardware_1.readStlinkProbeStatus)(fullOutput);
             if (detectedProbeStatus !== "non testé") {
                 stlinkProbeStatus = detectedProbeStatus;
             }
@@ -843,7 +1369,7 @@ class QC1PanelProvider {
                 }
             };
             refreshDashboard();
-            if (command === "make") {
+            if (["build", "rebuild", "tsmake", "run"].includes(command)) {
                 dashboardState = {
                     ...dashboardState,
                     build: {
@@ -860,7 +1386,7 @@ class QC1PanelProvider {
                     }
                 };
             }
-            if (command === "flash") {
+            if (["flash", "run"].includes(command)) {
                 dashboardState = {
                     ...dashboardState,
                     flash: {
@@ -879,9 +1405,9 @@ class QC1PanelProvider {
                 !parsed.hasFlashFailed;
             let commandError;
             if (error) {
-                const qc1Error = createQc1ErrorFromProcess(error, fullCommand, makeDir, stdoutText, stderrText);
+                const qc1Error = createQc1ErrorFromProcess(error, fullCommand, projectDir, stdoutText, stderrText);
                 commandError = qc1Error;
-                dashboardState = (0, dashboardState_1.finishProgress)(dashboardState, success, "QC1-CMD-OK", qc1Error.code, command === "make" ? "BUILD_SUCCESS" : command === "flash" ? "FLASH_SUCCESS" : "COMMAND_DONE", qc1Error.title, success ? `${command} terminé` : qc1Error.message, qc1Error.cause || "La commande QC1 a retourné une erreur", makeDir);
+                dashboardState = (0, dashboardState_1.finishProgress)(dashboardState, success, "QC1-CMD-OK", qc1Error.code, ["build", "rebuild", "tsmake", "run"].includes(command) ? "BUILD_SUCCESS" : command === "flash" ? "FLASH_SUCCESS" : "COMMAND_DONE", qc1Error.title, success ? `${command} terminé` : qc1Error.message, qc1Error.cause || "La commande QC1 a retourné une erreur", projectDir);
                 refreshDashboard();
                 stopRuntimeTimer();
                 this.appendQc1Error(qc1Error, "commande");
@@ -897,17 +1423,17 @@ class QC1PanelProvider {
                         message: "Commande échouée",
                         cause: failureCause,
                         command: fullCommand,
-                        cwd: makeDir,
+                        cwd: projectDir,
                         exitCode: 0,
                         stdout: stdoutText,
                         stderr: stderrText
                     });
                 commandError = qc1Error;
-                dashboardState = (0, dashboardState_1.finishProgress)(dashboardState, success, "QC1-CMD-OK", qc1Error?.code || "QC1-CMD-001", command === "make" ? "BUILD_SUCCESS" : command === "flash" ? "FLASH_SUCCESS" : "COMMAND_DONE", qc1Error?.title || "COMMANDE_ECHOUEE", success ? `${command} terminé` : qc1Error?.message || "Commande échouée", success ? "Commande terminée sans erreur détectée" : failureCause, makeDir);
+                dashboardState = (0, dashboardState_1.finishProgress)(dashboardState, success, "QC1-CMD-OK", qc1Error?.code || "QC1-CMD-001", ["build", "rebuild", "tsmake", "run"].includes(command) ? "BUILD_SUCCESS" : command === "flash" ? "FLASH_SUCCESS" : "COMMAND_DONE", qc1Error?.title || "COMMANDE_ECHOUEE", success ? `${command} terminé` : qc1Error?.message || "Commande échouée", success ? "Commande terminée sans erreur détectée" : failureCause, projectDir);
                 refreshDashboard();
                 stopRuntimeTimer();
                 if (success) {
-                    this.appendQc1CommandResult(fullCommand, makeDir, 0, stdoutText, stderrText);
+                    this.appendQc1CommandResult(fullCommand, projectDir, 0, stdoutText, stderrText);
                 }
                 else if (qc1Error) {
                     this.appendQc1Error(qc1Error, "commande");
@@ -970,6 +1496,11 @@ class QC1PanelProvider {
             lines.push("", "--- stdout ---", qc1Error.stdout?.trim() || "--", "", "--- stderr ---", qc1Error.stderr?.trim() || "--");
         }
         this.appendOutput(lines.join("\n"), "error");
+        void vscode.window.showErrorMessage(`[${qc1Error.code}] ${qc1Error.message}`, "Créer un rapport").then((action) => {
+            if (action === "Créer un rapport") {
+                void this.createDiagnosticReport();
+            }
+        });
     }
     appendQc1CommandResult(command, cwd, exitCode, stdout, stderr) {
         const lines = [
@@ -1085,78 +1616,62 @@ class QC1PanelProvider {
     }
 }
 QC1PanelProvider.viewType = "qc1.panel";
-function getWindowsToolsDir(context) {
-    return path.join(context.extensionPath, "resources", "tools", "windows");
-}
-function buildQc1Env(context) {
-    const env = { ...process.env };
-    if (process.platform === "win32") {
-        const windowsToolsDir = getWindowsToolsDir(context);
-        const makeExe = path.join(windowsToolsDir, "make.exe");
-        if (fs.existsSync(makeExe)) {
-            env.PATH = `${windowsToolsDir}${path.delimiter}${env.PATH ?? ""}`;
-        }
-    }
-    return env;
-}
-function activate(context) {
+async function activate(context) {
     outputChannel = vscode.window.createOutputChannel("QC1 STM32 Tools");
     context.subscriptions.push(outputChannel);
+    await initializeEmbeddedBuildTools();
     syncDashboardState(context);
     const provider = new QC1PanelProvider(context.extensionUri, context);
     const aiProvider = new aiPanel_1.LiixAiPanelProvider(context.extensionUri);
     context.subscriptions.push(vscode.window.registerWebviewViewProvider(QC1PanelProvider.viewType, provider));
     context.subscriptions.push(vscode.window.registerWebviewViewProvider(aiPanel_1.LiixAiPanelProvider.viewType, aiProvider));
     context.subscriptions.push(vscode.commands.registerCommand("qc1.build", () => {
-        runQuickCommand(context, ["make"]);
+        provider.runCommand("build");
     }));
     context.subscriptions.push(vscode.commands.registerCommand("qc1.clean", () => {
-        runQuickCommand(context, ["clean"]);
+        provider.runCommand("clean");
     }));
     context.subscriptions.push(vscode.commands.registerCommand("qc1.rebuild", () => {
-        runQuickCommand(context, ["clean"]);
-        runQuickCommand(context, ["make"]);
+        provider.runCommand("rebuild");
     }));
     context.subscriptions.push(vscode.commands.registerCommand("qc1.tsmake", () => {
-        runQuickCommand(context, ["tsmake"]);
+        provider.runCommand("tsmake");
     }));
     context.subscriptions.push(vscode.commands.registerCommand("qc1.flash", () => {
-        runQuickCommand(context, ["flash"]);
+        provider.runCommand("flash");
     }));
     context.subscriptions.push(vscode.commands.registerCommand("qc1.run", () => {
-        runQuickCommand(context, ["run"]);
+        provider.runCommand("run");
     }));
     context.subscriptions.push(vscode.commands.registerCommand("qc1.health", () => {
-        runQuickCommand(context, ["health"]);
+        provider.runCommand("health");
     }));
     context.subscriptions.push(vscode.commands.registerCommand("qc1.status", () => {
-        runQuickCommand(context, ["status"]);
+        provider.runCommand("status");
     }));
     context.subscriptions.push(vscode.commands.registerCommand("qc1.error", () => {
-        runQuickCommand(context, ["error"]);
+        provider.runCommand("error");
     }));
     context.subscriptions.push(vscode.commands.registerCommand("qc1.detectStlink", () => {
-        runQuickCommand(context, ["status"]);
+        provider.detectStlink();
     }));
     context.subscriptions.push(vscode.commands.registerCommand("qc1.openSerial", () => {
-        runQuickCommand(context, ["serial"]);
+        provider.openSerial();
     }));
     context.subscriptions.push(vscode.commands.registerCommand("qc1.startOpenOcd", () => {
-        const terminal = vscode.window.createTerminal("QC1 OpenOCD");
-        const openocdPath = getQc1Status(context).openocdOk
-            ? getQc1Status(context).openocdPath
-            : "openocd";
-        terminal.sendText(openocdPath);
-        terminal.show();
+        provider.startOpenOcd();
     }));
     context.subscriptions.push(vscode.commands.registerCommand("qc1.configure", () => {
         vscode.commands.executeCommand("workbench.action.openSettings", "@ext:Mistral400.QC1-STM32-Tools qc1");
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand("qc1.createDiagnosticReport", () => {
+        return provider.createDiagnosticReport();
     }));
     context.subscriptions.push(vscode.commands.registerCommand("qc1.refresh", () => {
         provider.clearOutput();
     }));
     context.subscriptions.push(vscode.commands.registerCommand("qc1.dev", () => {
-        runQuickCommand(context, ["dev"]);
+        provider.runCommand("dev");
     }));
     context.subscriptions.push(vscode.commands.registerCommand("qc1.openSettings", () => {
         vscode.commands.executeCommand("workbench.action.openSettings", "@ext:Mistral400.QC1-STM32-Tools");

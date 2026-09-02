@@ -113,7 +113,7 @@ export function parseQc1Output(output: string): QC1ParseResult {
     }
 
     if (
-      lower.includes("make: ***") ||
+      lower.includes("cmake error") ||
       lower.includes("recipe for target") ||
       lower.includes("build failed") ||
       lower.includes("compilation failed")

@@ -55,9 +55,9 @@ Documentation officielle des codes de diagnostic utilisés par QC1 STM32 Tools.
 | Code | Nom | Description |
 |---|---|---|
 | 400 | NO_WORKSPACE | Aucun dossier ouvert |
-| 401 | NO_MAKEFILE | Makefile introuvable |
-| 402 | NO_QUICK_COMMAND | Script quick-command introuvable |
-| 403 | NO_WINDOWS_MAKE | make.exe Windows introuvable |
+| 401 | NO_BUNDLED_CMAKE_PROJECT | Projet CMake QC1 intégré introuvable |
+| 402 | CMAKE_NOT_FOUND | CMake introuvable |
+| 403 | NINJA_NOT_FOUND | Ninja introuvable |
 | 404 | NO_ELF_FOUND | Fichier ELF introuvable |
 | 405 | NO_BIN_FOUND | Fichier BIN introuvable |
 | 406 | NO_BUILD_FOLDER | Dossier build introuvable |
@@ -80,13 +80,13 @@ Documentation officielle des codes de diagnostic utilisés par QC1 STM32 Tools.
 | 501 | FLASH_FAILED | Flash échoué |
 | 502 | UNKNOWN_COMMAND | Commande QC1 inconnue |
 | 503 | INVALID_PROJECT | Projet STM32 invalide |
-| 504 | EXECUTION_FAILED | Exécution du script impossible |
-| 505 | SCRIPT_PERMISSION_DENIED | Permission refusée |
+| 504 | EXECUTION_FAILED | Exécution de la commande CMake impossible |
+| 505 | CMAKE_CONFIGURATION_FAILED | Configuration CMake échouée |
 | 506 | TOOLCHAIN_FAILED | Toolchain en erreur |
 | 507 | GCC_EXECUTION_FAILED | GCC a échoué |
 | 508 | OPENOCD_FAILED | OpenOCD a échoué |
 | 509 | STLINK_FAILED | ST-Link a échoué |
-| 510 | MAKE_FAILED | make a échoué |
+| 510 | CMAKE_FAILED | CMake a échoué |
 | 511 | BUILD_INTERRUPTED | Build interrompu |
 | 512 | FLASH_INTERRUPTED | Flash interrompu |
 | 513 | SERIAL_CONNECTION_FAILED | Connexion série échouée |
@@ -115,7 +115,7 @@ Documentation officielle des codes de diagnostic utilisés par QC1 STM32 Tools.
 | 700 | GCC_READY | GCC prêt |
 | 701 | OPENOCD_READY | OpenOCD prêt |
 | 702 | STLINK_READY | ST-Link prêt |
-| 703 | MAKE_READY | make prêt |
+| 703 | CMAKE_READY | CMake et Ninja prêts |
 | 704 | TOOLCHAIN_READY | Toolchain prête |
 
 ---
@@ -128,7 +128,7 @@ Documentation officielle des codes de diagnostic utilisés par QC1 STM32 Tools.
 | 801 | CORE_FOLDER_FOUND | Dossier Core trouvé |
 | 802 | DRIVERS_FOLDER_FOUND | Dossier Drivers trouvé |
 | 803 | IOC_FOUND | Fichier IOC trouvé |
-| 804 | MAKEFILE_FOUND | Makefile trouvé |
+| 804 | BUNDLED_CMAKE_FOUND | Projet CMake QC1 intégré trouvé |
 | 805 | BUILD_FOLDER_FOUND | Dossier build trouvé |
 
 ---
@@ -161,7 +161,7 @@ Message: Compilation réussie
 ```txt
 Code: 401
 Niveau: Avertissement
-Message: Makefile introuvable
+Message: Projet CMake QC1 intégré introuvable
 ```
 
 ## Erreur

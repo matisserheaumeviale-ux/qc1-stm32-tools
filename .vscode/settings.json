@@ -3,5 +3,6 @@
     "qc1.makefilePath": "",
     "qc1.compilerPath": "",
     "qc1.openocdPath": "",
-    "liix.localModel": "liix-code-mini-0.1:latest"
+    "liix.localModel": "liix-vera:0.1a-14b",
+    "cmake.sourceDirectory": "/Users/matisserheaume-viale/Code/AFLC/qc1-stm32-tools/qc1-vscode/resources/cmake"
 }

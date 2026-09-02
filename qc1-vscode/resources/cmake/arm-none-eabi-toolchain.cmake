@@ -1,0 +1,27 @@
+set(CMAKE_SYSTEM_NAME Generic)
+set(CMAKE_SYSTEM_PROCESSOR ARM)
+set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+
+if(QC1_ARM_GCC)
+  set(_qc1_gcc "${QC1_ARM_GCC}")
+else()
+  find_program(_qc1_gcc NAMES arm-none-eabi-gcc REQUIRED)
+endif()
+
+get_filename_component(_qc1_toolchain_dir "${_qc1_gcc}" DIRECTORY)
+if(WIN32)
+  set(_qc1_exe_suffix ".exe")
+else()
+  set(_qc1_exe_suffix "")
+endif()
+
+set(CMAKE_C_COMPILER "${_qc1_gcc}" CACHE FILEPATH "ARM GCC compiler" FORCE)
+set(CMAKE_ASM_COMPILER "${_qc1_gcc}" CACHE FILEPATH "ARM assembler" FORCE)
+set(CMAKE_AR "${_qc1_toolchain_dir}/arm-none-eabi-ar${_qc1_exe_suffix}" CACHE FILEPATH "ARM archiver" FORCE)
+set(CMAKE_OBJCOPY "${_qc1_toolchain_dir}/arm-none-eabi-objcopy${_qc1_exe_suffix}" CACHE FILEPATH "ARM objcopy" FORCE)
+set(CMAKE_SIZE "${_qc1_toolchain_dir}/arm-none-eabi-size${_qc1_exe_suffix}" CACHE FILEPATH "ARM size" FORCE)
+
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)

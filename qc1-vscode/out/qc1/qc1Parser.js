@@ -77,7 +77,7 @@ function parseQc1Output(output) {
                 warnings++;
             }
         }
-        if (lower.includes("make: ***") ||
+        if (lower.includes("cmake error") ||
             lower.includes("recipe for target") ||
             lower.includes("build failed") ||
             lower.includes("compilation failed")) {

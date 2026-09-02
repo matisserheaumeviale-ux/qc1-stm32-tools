@@ -55,19 +55,23 @@ export interface QC1ProjectStatus {
   projectDetected: boolean;
   projectStatus: "OK" | "PARTIEL" | "ERREUR";
 
-  makefileFound: boolean;
+  cmakeProjectReady: boolean;
 
   coreFolderFound: boolean;
   driversFolderFound: boolean;
+  startupFound: boolean;
+  linkerScriptFound: boolean;
   buildFolderFound: boolean;
 
   elfFound: boolean;
   binFound: boolean;
 
   workspacePath: string;
-  makefilePath: string;
+  cmakeSourcePath: string;
   corePath: string;
   driversPath: string;
+  startupPath: string;
+  linkerScriptPath: string;
 }
 
 export interface QC1EnvironmentStatus {
@@ -75,9 +79,9 @@ export interface QC1EnvironmentStatus {
   osRaw: NodeJS.Platform;
 
   extensionVersion: string;
-  quickCommandPath: string;
-  makePath: string;
-  bundledMakePath: string;
+  cmakePath: string;
+  cmakeSourcePath: string;
+  buildPath: string;
   offlinePortable: boolean;
 
   gccDetected: boolean;
@@ -85,9 +89,7 @@ export interface QC1EnvironmentStatus {
   stlinkDetected: boolean;
   stFlashInstalled: boolean;
   stlinkProbeStatus: "OK" | "non détecté" | "non testé";
-  makeDetected: boolean;
-
-  bundledMakeUsed: boolean;
+  cmakeDetected: boolean;
 }
 
 export interface DashboardState {
@@ -175,39 +177,41 @@ export const defaultDashboardState: DashboardState = {
     projectDetected: false,
     projectStatus: "ERREUR",
 
-    makefileFound: false,
+    cmakeProjectReady: false,
 
     coreFolderFound: false,
     driversFolderFound: false,
+    startupFound: false,
+    linkerScriptFound: false,
     buildFolderFound: false,
 
     elfFound: false,
     binFound: false,
 
     workspacePath: "--",
-    makefilePath: "--",
+    cmakeSourcePath: "--",
     corePath: "--",
-    driversPath: "--"
+    driversPath: "--",
+    startupPath: "--",
+    linkerScriptPath: "--"
   },
 
   environment: {
     os: getOsLabel(process.platform),
     osRaw: process.platform,
 
-    extensionVersion: "0.1.4",
-    quickCommandPath: "quick-command",
-    makePath: "--",
-    bundledMakePath: "--",
-    offlinePortable: false,
+    extensionVersion: "0.3.1",
+    cmakePath: "--",
+    cmakeSourcePath: "--",
+    buildPath: "--",
+    offlinePortable: true,
 
     gccDetected: false,
     openocdDetected: false,
     stlinkDetected: false,
     stFlashInstalled: false,
     stlinkProbeStatus: "non testé",
-    makeDetected: false,
-
-    bundledMakeUsed: false
+    cmakeDetected: false
   }
 };
 export function startProgress(
