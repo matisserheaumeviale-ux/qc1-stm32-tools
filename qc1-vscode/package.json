@@ -13,7 +13,6 @@
     "out/**",
     "media/**",
     "resources/cmake/**",
-    "examples/**",
     "QC1_CODES.md",
     "CHANGELOG.md",
     "README.md",
@@ -38,7 +37,15 @@
     "onCommand:qc1.flash",
     "onCommand:qc1.run",
     "onCommand:qc1.status",
-    "onCommand:qc1.createDiagnosticReport"
+    "onCommand:qc1.createDiagnosticReport",
+    "onCommand:liix.newChat",
+    "onCommand:liix.explainActiveFile",
+    "onCommand:liix.fixDiagnostics",
+    "onCommand:liix.openTerminal",
+    "onCommand:liix.stopAgent",
+    "onCommand:liix.undoLastEdit",
+    "onCommand:liix.openLastDiff",
+    "onCommand:liix.refreshLocalModels"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -160,6 +167,46 @@
       {
         "command": "qc1.dev",
         "title": "QC1: Dev Mode"
+      },
+      {
+        "command": "liix.newChat",
+        "title": "New Chat",
+        "category": "Liix"
+      },
+      {
+        "command": "liix.explainActiveFile",
+        "title": "Explain Active File",
+        "category": "Liix"
+      },
+      {
+        "command": "liix.fixDiagnostics",
+        "title": "Fix Diagnostics",
+        "category": "Liix"
+      },
+      {
+        "command": "liix.openTerminal",
+        "title": "Open Terminal",
+        "category": "Liix"
+      },
+      {
+        "command": "liix.stopAgent",
+        "title": "Stop Agent",
+        "category": "Liix"
+      },
+      {
+        "command": "liix.undoLastEdit",
+        "title": "Undo Last Edit",
+        "category": "Liix"
+      },
+      {
+        "command": "liix.openLastDiff",
+        "title": "Open Last Diff",
+        "category": "Liix"
+      },
+      {
+        "command": "liix.refreshLocalModels",
+        "title": "Refresh Local Models",
+        "category": "Liix"
       }
     ],
     "menus": {
@@ -334,7 +381,7 @@
         "properties": {
           "liix.provider": {
             "type": "string",
-            "default": "liix",
+            "default": "local",
             "enum": [
               "liix",
               "local"
@@ -353,12 +400,12 @@
           },
           "liix.localApiUrl": {
             "type": "string",
-            "default": "http://localhost:11434",
+            "default": "http://localhost:1234",
             "description": "Local AI server URL. Example: Ollama http://localhost:11434 or LM Studio http://localhost:1234"
           },
           "liix.localApiType": {
             "type": "string",
-            "default": "ollama",
+            "default": "openai-compatible",
             "enum": [
               "ollama",
               "openai-compatible"
@@ -367,8 +414,18 @@
           },
           "liix.localModel": {
             "type": "string",
-            "default": "qwen2.5-coder:7b-instruct",
-            "description": "Local model name to use"
+            "default": "",
+            "description": "Exact local model ID returned by LM Studio or Ollama"
+          },
+          "liix.supportsToolCalling": {
+            "type": "string",
+            "default": "auto",
+            "enum": [
+              "auto",
+              "native",
+              "fallback"
+            ],
+            "description": "Use native tool calling, automatic fallback, or structured fallback"
           },
           "liix.defaultModel": {
             "type": "string",
@@ -427,6 +484,27 @@
             "minimum": 256,
             "maximum": 131072,
             "description": "Maximum response tokens target"
+          },
+          "liix.maxAgentSteps": {
+            "type": "number",
+            "default": 20,
+            "minimum": 1,
+            "maximum": 50,
+            "description": "Maximum model iterations in one Liix agent task"
+          },
+          "liix.maxToolCalls": {
+            "type": "number",
+            "default": 60,
+            "minimum": 1,
+            "maximum": 200,
+            "description": "Maximum structured tool calls in one Liix task"
+          },
+          "liix.contextBudgetChars": {
+            "type": "number",
+            "default": 80000,
+            "minimum": 8000,
+            "maximum": 1000000,
+            "description": "Approximate character budget for the active local-model conversation"
           },
           "liix.temperature": {
             "type": "number",

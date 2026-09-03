@@ -1792,6 +1792,7 @@ async function activate(context) {
     syncDashboardState(context);
     const provider = new QC1PanelProvider(context.extensionUri, context);
     const aiProvider = new aiPanel_1.LiixAiPanelProvider(context.extensionUri);
+    context.subscriptions.push(aiProvider);
     context.subscriptions.push(vscode.window.registerWebviewViewProvider(QC1PanelProvider.viewType, provider));
     context.subscriptions.push(vscode.window.registerWebviewViewProvider(aiPanel_1.LiixAiPanelProvider.viewType, aiProvider));
     // Les identifiants doivent rester identiques à `contributes.commands` dans package.json.
@@ -1845,6 +1846,33 @@ async function activate(context) {
     }));
     context.subscriptions.push(vscode.commands.registerCommand("qc1.openSettings", () => {
         vscode.commands.executeCommand("workbench.action.openSettings", "@ext:Mistral400.QC1-STM32-Tools");
+    }));
+    // Commandes Liix disponibles depuis la palette, sans dépendre des slash commands.
+    const openLiix = async () => {
+        await vscode.commands.executeCommand("workbench.view.extension.liix-ai");
+    };
+    context.subscriptions.push(vscode.commands.registerCommand("liix.newChat", async () => {
+        await openLiix();
+        aiProvider.newChat();
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand("liix.explainActiveFile", async () => {
+        await openLiix();
+        aiProvider.requestPrompt("Explique le fichier actif, son rôle, ses points importants et les risques éventuels.", "chat");
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand("liix.fixDiagnostics", async () => {
+        await openLiix();
+        aiProvider.requestPrompt("Inspecte les diagnostics VS Code, corrige les erreurs pertinentes puis vérifie le résultat.", "agent");
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand("liix.openTerminal", async () => {
+        await openLiix();
+        aiProvider.showPage("terminal");
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand("liix.stopAgent", () => aiProvider.stop()));
+    context.subscriptions.push(vscode.commands.registerCommand("liix.undoLastEdit", () => void aiProvider.undoLastEdit()));
+    context.subscriptions.push(vscode.commands.registerCommand("liix.openLastDiff", () => void aiProvider.openLastDiff()));
+    context.subscriptions.push(vscode.commands.registerCommand("liix.refreshLocalModels", async () => {
+        await openLiix();
+        await aiProvider.refreshModels();
     }));
 }
 // Les ressources enregistrées dans `context.subscriptions` sont libérées par VS Code.

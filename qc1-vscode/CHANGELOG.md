@@ -7,6 +7,10 @@
 - Add a privacy-aware Markdown diagnostic report containing QC1, project, toolchain, hardware, build, VS Code problem, Git and recent log context.
 - Preview reports before saving or copying them, with automatic secret and personal-path redaction.
 - Add real-time Ninja progress parsing from streamed `[completed/total]` build output.
+- Add a multi-step Liix Code Agent controller with structured read, search, diagnostics, edit, terminal, build, test and Git tools.
+- Add LM Studio `/v1/models`, OpenAI-compatible conversation history, native `tool_calls`, structured fallback and real SSE streaming.
+- Add cancellable spawned processes, inline permissions, edit checkpoints, Undo and last-diff commands.
+- Add Liix command-palette actions for new chat, active-file explanation, diagnostic fixes, terminal, Stop, Undo, diff and model refresh.
 
 ### Fixed
 
@@ -25,6 +29,8 @@
 
 - Redesign the QC1 dashboard around clearer primary actions, live progress, build, flash, project and diagnostic cards.
 - Run configure, clean, build and flash as separate spawned processes so output reaches the Webview while commands are running.
+- Redesign Liix AI around the conversation, compact inline tool steps, the circular activity ring, a modern composer, Tasks, Terminal and LM Studio Settings.
+- Route legacy slash commands through the same validated tool executor instead of using them as the main agent mechanism.
 
 ## 0.3.0
 

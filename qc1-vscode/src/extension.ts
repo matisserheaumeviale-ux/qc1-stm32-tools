@@ -2151,6 +2151,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
   const provider = new QC1PanelProvider(context.extensionUri, context);
   const aiProvider = new LiixAiPanelProvider(context.extensionUri);
+  context.subscriptions.push(aiProvider);
 
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(QC1PanelProvider.viewType, provider)
@@ -2210,6 +2211,34 @@ export async function activate(context: vscode.ExtensionContext) {
   }));
   context.subscriptions.push(vscode.commands.registerCommand("qc1.openSettings", () => {
     vscode.commands.executeCommand("workbench.action.openSettings", "@ext:Mistral400.QC1-STM32-Tools");
+  }));
+
+  // Commandes Liix disponibles depuis la palette, sans dépendre des slash commands.
+  const openLiix = async (): Promise<void> => {
+    await vscode.commands.executeCommand("workbench.view.extension.liix-ai");
+  };
+  context.subscriptions.push(vscode.commands.registerCommand("liix.newChat", async () => {
+    await openLiix();
+    aiProvider.newChat();
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand("liix.explainActiveFile", async () => {
+    await openLiix();
+    aiProvider.requestPrompt("Explique le fichier actif, son rôle, ses points importants et les risques éventuels.", "chat");
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand("liix.fixDiagnostics", async () => {
+    await openLiix();
+    aiProvider.requestPrompt("Inspecte les diagnostics VS Code, corrige les erreurs pertinentes puis vérifie le résultat.", "agent");
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand("liix.openTerminal", async () => {
+    await openLiix();
+    aiProvider.showPage("terminal");
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand("liix.stopAgent", () => aiProvider.stop()));
+  context.subscriptions.push(vscode.commands.registerCommand("liix.undoLastEdit", () => void aiProvider.undoLastEdit()));
+  context.subscriptions.push(vscode.commands.registerCommand("liix.openLastDiff", () => void aiProvider.openLastDiff()));
+  context.subscriptions.push(vscode.commands.registerCommand("liix.refreshLocalModels", async () => {
+    await openLiix();
+    await aiProvider.refreshModels();
   }));
 }
 

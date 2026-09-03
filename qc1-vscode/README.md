@@ -2,6 +2,25 @@
 
 QC1 permet de compiler et flasher un projet STM32F103 directement depuis VS Code. La compilation utilise **CMake + Ninja**. Si le firmware possède son propre `CMakeLists.txt`, QC1 l'utilise; sinon, QC1 utilise le projet CMake embarqué dans le VSIX.
 
+## Liix AI — agent local avec LM Studio
+
+L'icône **Liix AI** ouvre maintenant un assistant de programmation agentique. En mode Agent ou Full, le modèle peut demander des outils structurés pour inspecter le workspace, lire et rechercher des fichiers, consulter les diagnostics, appliquer une modification, lancer un build ou des tests et relire Git. Chaque résultat est réinjecté dans la conversation avant le tour suivant du modèle.
+
+Pour utiliser LM Studio :
+
+1. démarre le serveur local de LM Studio et charge un modèle de code;
+2. ouvre **Liix AI → Settings → Local Runtime**;
+3. sélectionne `Local / LM Studio` et `OpenAI Compatible`;
+4. indique l'endpoint enregistré par LM Studio, souvent `http://localhost:1234`;
+5. clique sur **Test Connection**, puis **Refresh local models**;
+6. choisis le nom exact retourné par `/v1/models`.
+
+Le provider local est le défaut pour une nouvelle configuration; Liix Cloud doit être sélectionné explicitement.
+
+Liix utilise `/v1/chat/completions` avec l'historique `system/user/assistant/tool`. Le function calling natif est prioritaire; le mode `Auto` retombe sur un format `<tool_call>` contrôlé lorsque le modèle refuse les tools. Le streaming SSE est affiché dès les premiers tokens, sans animation de frappe simulée.
+
+Les modes gardent des limites différentes : Chat lit sans modifier; Agent demande une confirmation pour les écritures et commandes; Full automatise les opérations de risque faible ou moyen autorisées, mais conserve une confirmation pour le risque élevé. Les chemins hors workspace et les commandes destructives telles que `git reset --hard`, `git clean -fd`, `git push --force`, `sudo` et `rm -rf` restent bloqués.
+
 ## Par quoi commencer
 
 1. Installe l'extension QC1 :
