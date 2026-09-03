@@ -1,11 +1,30 @@
+/**
+ * RÉSUMÉ DU FICHIER — INTERFACE HTML DU TABLEAU DE BORD QC1
+ *
+ * Ce fichier fabrique toute la Webview QC1 (HTML + CSS + JavaScript embarqué).
+ * Il reçoit un `DashboardState` déjà calculé par `extension.ts` et retourne une
+ * grande chaîne HTML à afficher dans la barre latérale de VS Code.
+ *
+ * Où modifier quoi :
+ * - fonctions du haut : petits composants HTML réutilisables;
+ * - bloc `<style>` : couleurs, disposition, cartes et barre de progression;
+ * - bloc `<body>` : onglets Dashboard, Terminal et Paramètres;
+ * - bloc `<script>` : clics utilisateur et messages échangés avec extension.ts.
+ *
+ * Barre de progression : `ProgressManager` lit `[x/y]` dans stdout de Ninja,
+ * `extension.ts` envoie un message progress, puis le script modifie le DOM en direct.
+ */
+
 import { DashboardState } from "./dashboardState";
 
+// Petit composant qui affiche un badge vert ou neutre selon une valeur booléenne.
 function statusBadge(value: boolean, okText = "OK", failText = "--"): string {
   return value
     ? `<span class="badge badge-ok">${okText}</span>`
     : `<span class="badge badge-muted">${failText}</span>`;
 }
 
+// Traduit le niveau logique du diagnostic en classe CSS.
 function diagnosticClass(level: string): string {
   switch (level) {
     case "success":
@@ -21,22 +40,56 @@ function diagnosticClass(level: string): string {
   }
 }
 
+// Convertit une durée interne en millisecondes vers un texte lisible.
 function formatMs(ms: number): string {
   if (!ms || ms <= 0) return "--";
   return `${(ms / 1000).toFixed(1)} s`;
 }
 
-function progressBar(percent: number): string {
-  const safePercent = Math.max(0, Math.min(100, percent));
+// Rend les phases techniques compréhensibles sans exposer les noms internes anglais.
+function progressPhaseLabel(phase: DashboardState["progress"]["phase"]): string {
+  const labels: Record<DashboardState["progress"]["phase"], string> = {
+    idle: "Prêt",
+    preparing: "Préparation",
+    configuring: "Configuration",
+    cleaning: "Nettoyage",
+    building: "Compilation",
+    flashing: "Flash",
+    complete: "Terminé",
+    error: "Erreur"
+  };
+  return labels[phase];
+}
+
+// Ninja est la seule phase qui fournit un compteur exact `[x/y]`.
+function progressCounterLabel(progress: DashboardState["progress"]): string {
+  if (progress.measured && progress.totalSteps > 0) {
+    return `${progress.completedSteps} / ${progress.totalSteps}`;
+  }
+  return progress.phase === "building" ? "En attente de Ninja" : "Étape non mesurée";
+}
+
+/**
+ * Construit la barre visible avec compteur réel, phase, étape et durée.
+ * `safePercent` protège le CSS en forçant une valeur entre 0 et 100.
+ */
+function progressBar(progress: DashboardState["progress"]): string {
+  const safePercent = Math.max(0, Math.min(100, progress.progressPercent));
+  const counter = progressCounterLabel(progress);
 
   return `
-    <div class="progress-track">
-      <div class="progress-fill" style="width: ${safePercent}%"></div>
+    <div class="progress-track" role="progressbar" aria-label="Progression Ninja" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${safePercent}">
+      <div id="progressFill" class="progress-fill" style="width: ${safePercent}%"></div>
+      <div class="progress-glow"></div>
     </div>
-    <div class="progress-text">${safePercent}%</div>
+    <div class="progress-meta">
+      <span id="progressCounter" class="progress-counter">${counter}</span>
+      <span id="progressPercent" class="progress-text">${safePercent}%</span>
+    </div>
   `;
 }
 
+/** Reconstruit le document complet à partir d'une photographie de l'état QC1. */
 export function getDashboardHtml(state: DashboardState): string {
   const diagnosticStyle = diagnosticClass(state.diagnostic.level);
 
@@ -50,6 +103,7 @@ export function getDashboardHtml(state: DashboardState): string {
   />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <style>
+    /* === THÈME : variables reliées aux couleurs actives de VS Code === */
     :root {
       --bg: var(--vscode-editor-background);
       --panel: color-mix(in srgb, var(--vscode-sideBar-background) 84%, transparent);
@@ -59,13 +113,17 @@ export function getDashboardHtml(state: DashboardState): string {
       --accent: var(--vscode-button-background);
       --accent-2: var(--vscode-progressBar-background);
       --fg: var(--vscode-editor-foreground);
+      --success: #49d17d;
+      --warning: #ffbd5b;
+      --danger: #ff6875;
+      --shadow: 0 16px 42px rgba(0, 0, 0, 0.16);
     }
 
     * { box-sizing: border-box; }
 
     body {
       margin: 0;
-      padding: 16px;
+      padding: 18px;
       font-family: var(--vscode-font-family);
       background:
         radial-gradient(circle at top left, color-mix(in srgb, var(--accent) 18%, transparent), transparent 34%),
@@ -76,18 +134,48 @@ export function getDashboardHtml(state: DashboardState): string {
     .shell {
       display: flex;
       flex-direction: column;
-      gap: 14px;
+      gap: 16px;
     }
 
     .hero, .card, .progress-card, .terminal-frame, .diagnostic {
       border: 1px solid var(--border);
-      border-radius: 16px;
-      background: var(--panel);
-      backdrop-filter: blur(6px);
+      border-radius: 18px;
+      background: linear-gradient(145deg, var(--panel), var(--panel-2));
+      box-shadow: var(--shadow);
     }
 
     .hero {
-      padding: 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 18px;
+      overflow: hidden;
+      position: relative;
+    }
+
+    .hero::after {
+      content: "";
+      position: absolute;
+      width: 180px;
+      height: 180px;
+      right: -80px;
+      top: -100px;
+      border-radius: 50%;
+      background: color-mix(in srgb, var(--accent) 20%, transparent);
+      filter: blur(8px);
+      pointer-events: none;
+    }
+
+    .hero-main { min-width: 0; z-index: 1; }
+
+    .hero-kicker {
+      color: var(--accent-2);
+      font-size: 10px;
+      font-weight: 900;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      margin-bottom: 5px;
     }
 
     .hero-title {
@@ -114,6 +202,31 @@ export function getDashboardHtml(state: DashboardState): string {
       color: var(--muted);
       font-size: 13px;
     }
+
+    .hero-status {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 7px 10px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--panel-2) 88%, transparent);
+      font-size: 11px;
+      font-weight: 800;
+      z-index: 1;
+      white-space: nowrap;
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--success);
+      box-shadow: 0 0 10px color-mix(in srgb, var(--success) 70%, transparent);
+    }
+
+    .status-dot.busy { background: var(--warning); }
+    .status-dot.error { background: var(--danger); }
 
     .tabs {
       display: grid;
@@ -146,7 +259,8 @@ export function getDashboardHtml(state: DashboardState): string {
     }
 
     .progress-card {
-      padding: 14px;
+      padding: 18px;
+      border-color: color-mix(in srgb, var(--accent-2) 42%, var(--border));
     }
 
     .progress-head {
@@ -154,6 +268,92 @@ export function getDashboardHtml(state: DashboardState): string {
       justify-content: space-between;
       gap: 12px;
       margin-bottom: 10px;
+    }
+
+    .progress-title-line {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 5px;
+    }
+
+    .phase-badge {
+      padding: 3px 8px;
+      border-radius: 999px;
+      color: var(--accent-2);
+      background: color-mix(in srgb, var(--accent-2) 14%, transparent);
+      font-size: 10px;
+      font-weight: 900;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    .runtime-chip {
+      min-width: 76px;
+      padding: 8px 10px;
+      border-radius: 12px;
+      background: color-mix(in srgb, var(--panel-2) 82%, transparent);
+      text-align: center;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .current-step {
+      min-height: 20px;
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 12px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .command-dock {
+      display: grid;
+      grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
+      gap: 10px;
+      padding: 10px;
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      background: color-mix(in srgb, var(--panel) 82%, transparent);
+    }
+
+    .primary-actions, .utility-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .primary-actions button { flex: 1 1 92px; }
+    .utility-actions button { flex: 1 1 110px; }
+
+    .primary-action {
+      min-height: 42px;
+      box-shadow: 0 8px 18px color-mix(in srgb, var(--accent) 22%, transparent);
+    }
+
+    .hardware-strip {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      overflow-x: auto;
+      padding: 2px 1px;
+    }
+
+    .hardware-strip .strip-label {
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 900;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      white-space: nowrap;
+      margin-right: 2px;
+    }
+
+    .hardware-strip button {
+      flex: 0 0 auto;
+      padding: 7px 10px;
+      border-radius: 999px;
+      font-size: 11px;
     }
 
     .grid {
@@ -170,6 +370,16 @@ export function getDashboardHtml(state: DashboardState): string {
 
     .card, .diagnostic {
       padding: 14px;
+    }
+
+    .metric-card { position: relative; overflow: hidden; }
+    .metric-card::before {
+      content: "";
+      position: absolute;
+      inset: 0 auto 0 0;
+      width: 3px;
+      background: var(--accent-2);
+      opacity: 0.7;
     }
 
     .card-title {
@@ -260,31 +470,67 @@ export function getDashboardHtml(state: DashboardState): string {
       background: var(--vscode-button-hoverBackground);
     }
 
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.48;
+      box-shadow: none;
+    }
+
     .secondary {
       background: var(--vscode-button-secondaryBackground);
       color: var(--vscode-button-secondaryForeground);
     }
 
+    /* === BARRE DE PROGRESSION : piste, remplissage animé et pourcentage === */
     .progress-track {
       width: 100%;
-      height: 12px;
+      height: 14px;
       border-radius: 999px;
-      background: rgba(127,127,127,0.18);
+      background: color-mix(in srgb, var(--panel-2) 72%, #000);
       overflow: hidden;
+      position: relative;
     }
 
     .progress-fill {
       height: 100%;
       border-radius: 999px;
-      background: var(--accent-2);
-      transition: width 0.25s ease;
+      background: linear-gradient(90deg, var(--accent), var(--accent-2), #67c8ff);
+      transition: width 0.18s ease-out;
+      position: relative;
+      z-index: 1;
+    }
+
+    .progress-fill::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(110deg, transparent 20%, rgba(255,255,255,0.28) 48%, transparent 76%);
+      animation: progress-shine 1.5s linear infinite;
+    }
+
+    @keyframes progress-shine {
+      from { transform: translateX(-100%); }
+      to { transform: translateX(100%); }
+    }
+
+    .progress-meta {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 8px;
+    }
+
+    .progress-counter {
+      color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
     }
 
     .progress-text {
-      margin-top: 6px;
-      text-align: right;
       font-weight: 800;
       font-size: 13px;
+      font-variant-numeric: tabular-nums;
     }
 
     .terminal {
@@ -400,20 +646,36 @@ export function getDashboardHtml(state: DashboardState): string {
     }
 
     @media (max-width: 920px) {
-      .grid, .grid-2, .section-grid {
+      .grid, .grid-2, .section-grid, .command-dock {
         grid-template-columns: 1fr;
       }
+    }
+
+    @media (max-width: 520px) {
+      body { padding: 10px; }
+      .hero { align-items: flex-start; }
+      .hero-status { display: none; }
+      .progress-head { align-items: flex-start; }
+      .grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
 <body>
+  <!-- Structure générale de la Webview. Chaque onglet correspond à un <section>. -->
   <div class="shell">
     <section class="hero">
-      <div class="hero-title">
-        QC1 STM32 Tools <span class="version-badge">v${state.environment.extensionVersion}</span>
+      <div class="hero-main">
+        <div class="hero-kicker">Environnement embarqué</div>
+        <div class="hero-title">
+          QC1 STM32 <span class="version-badge">v${state.environment.extensionVersion}</span>
+        </div>
+        <div class="hero-subtitle">
+          <span id="heroProject">${state.projectName}</span> · <span id="heroLastCommand">${state.lastCommand}</span> · ${state.environment.os}
+        </div>
       </div>
-      <div class="hero-subtitle">
-        OS: ${state.environment.os} · Projet: ${state.projectName} · Dernière commande: ${state.lastCommand}
+      <div class="hero-status">
+        <span id="heroDot" class="status-dot"></span>
+        <span id="heroStatus">${state.project.projectDetected ? "Projet prêt" : "À vérifier"}</span>
       </div>
     </section>
 
@@ -423,57 +685,68 @@ export function getDashboardHtml(state: DashboardState): string {
       <button class="tab" data-panel="settingsPanel" onclick="showPanel(event, 'settingsPanel')">Parametres</button>
     </section>
 
+    <!-- ONGLET DASHBOARD : progression, commandes rapides et état STM32. -->
     <section id="dashboardPanel" class="panel active">
       <div class="dashboard">
+        <!-- Le contenu est ensuite mis à jour en direct par les messages progress. -->
         <section class="progress-card">
           <div class="progress-head">
             <div>
-              <div class="card-title">Progression tâche active</div>
-              <div class="big-value">${state.progress.taskName || "Aucune tâche"}</div>
+              <div class="progress-title-line">
+                <div class="card-title" style="margin:0">Progression réelle</div>
+                <span id="progressPhase" class="phase-badge">${progressPhaseLabel(state.progress.phase)}</span>
+              </div>
+              <div id="progressTask" class="big-value">${state.progress.taskName || "Prêt à compiler"}</div>
             </div>
-            <div class="value">Runtime: ${state.progress.runtimeSeconds}s</div>
+            <div class="runtime-chip"><span id="progressRuntime">${state.progress.runtimeSeconds}</span> s</div>
           </div>
-          ${progressBar(state.progress.progressPercent)}
-          <div class="row">
-            <span class="label">Etape</span>
-            <span class="value">${state.progress.currentStep || "--"}</span>
+          ${progressBar(state.progress)}
+          <div id="progressStep" class="current-step">${state.progress.currentStep || "La prochaine sortie Ninja apparaîtra ici."}</div>
+        </section>
+
+        <section class="command-dock">
+          <div class="primary-actions">
+            <button data-task-command class="primary-action" onclick="sendCommand('build')">Compiler</button>
+            <button data-task-command class="primary-action" onclick="sendCommand('flash')">Flasher</button>
+            <button data-task-command class="primary-action" onclick="sendCommand('run')">Compiler + flasher</button>
+          </div>
+          <div class="utility-actions">
+            <button onclick="sendCommand('status')" class="secondary">Vérifier</button>
+            <button data-task-command onclick="sendCommand('clean')" class="secondary">Nettoyer</button>
+            <button onclick="sendCommand('openLogs')" class="secondary">Journaux</button>
+            <button onclick="createDiagnosticReport()" class="secondary">Rapport</button>
           </div>
         </section>
 
-        <section class="actions">
-          <button onclick="sendCommand('build')">Build CMake</button>
-          <button onclick="sendCommand('clean')" class="secondary">Clean</button>
-          <button onclick="sendCommand('flash')">Flash</button>
-          <button onclick="sendCommand('status')" class="secondary">Status</button>
-          <button onclick="sendCommand('detect-stlink')" class="secondary">Detect ST-Link</button>
-          <button onclick="sendCommand('open-serial')" class="secondary">Open Serial</button>
-          <button onclick="sendCommand('start-openocd')" class="secondary">Start OpenOCD</button>
-          <button onclick="sendCommand('openLogs')" class="secondary">Open Logs</button>
-          <button onclick="createDiagnosticReport()" class="secondary">Créer un rapport</button>
+        <section class="hardware-strip" aria-label="Outils matériels">
+          <span class="strip-label">Matériel</span>
+          <button onclick="sendCommand('detect-stlink')" class="secondary">Détecter ST-Link</button>
+          <button onclick="sendCommand('open-serial')" class="secondary">Moniteur série</button>
+          <button onclick="sendCommand('start-openocd')" class="secondary">Serveur OpenOCD</button>
         </section>
 
         <section class="grid">
-          <div class="card">
+          <div class="card metric-card">
             <div class="card-title">Build</div>
-            <div class="big-value">${state.build.lastBuildSuccess ? "OK" : "--"}</div>
-            <div class="row"><span class="label">Dernier build</span><span class="value">${state.build.lastBuildTime}</span></div>
-            <div class="row"><span class="label">Durée</span><span class="value">${formatMs(state.build.buildRuntimeMs)}</span></div>
-            <div class="row"><span class="label">Erreurs C</span><span class="value">${state.build.errors}</span></div>
-            <div class="row"><span class="label">Warnings C</span><span class="value">${state.build.warnings}</span></div>
+            <div id="buildStatusValue" class="big-value">${state.build.lastBuildSuccess ? "Réussi" : "--"}</div>
+            <div class="row"><span class="label">Dernier build</span><span id="buildTime" class="value">${state.build.lastBuildTime}</span></div>
+            <div class="row"><span class="label">Durée</span><span id="buildRuntime" class="value">${formatMs(state.build.buildRuntimeMs)}</span></div>
+            <div class="row"><span class="label">Erreurs</span><span id="buildErrors" class="value">${state.build.errors}</span></div>
+            <div class="row"><span class="label">Avertissements</span><span id="buildWarnings" class="value">${state.build.warnings}</span></div>
           </div>
 
-          <div class="card">
+          <div class="card metric-card">
             <div class="card-title">Flash</div>
-            <div class="big-value">${state.flash.lastFlashSuccess ? "OK" : "--"}</div>
-            <div class="row"><span class="label">Dernier flash</span><span class="value">${state.flash.lastFlashTime}</span></div>
-            <div class="row"><span class="label">Durée</span><span class="value">${formatMs(state.flash.flashRuntimeMs)}</span></div>
-            <div class="row"><span class="label">Méthode</span><span class="value">${state.flash.method}</span></div>
-            <div class="row"><span class="label">MCU</span><span class="value">${state.flash.targetMCU}</span></div>
+            <div id="flashStatusValue" class="big-value">${state.flash.lastFlashSuccess ? "Réussi" : "--"}</div>
+            <div class="row"><span class="label">Dernier flash</span><span id="flashTime" class="value">${state.flash.lastFlashTime}</span></div>
+            <div class="row"><span class="label">Durée</span><span id="flashRuntime" class="value">${formatMs(state.flash.flashRuntimeMs)}</span></div>
+            <div class="row"><span class="label">Méthode</span><span id="flashMethod" class="value">${state.flash.method}</span></div>
+            <div class="row"><span class="label">MCU</span><span id="flashMcu" class="value">${state.flash.targetMCU}</span></div>
           </div>
 
-          <div class="card">
+          <div class="card metric-card">
             <div class="card-title">Projet</div>
-            <div class="big-value">${state.project.projectStatus}</div>
+            <div id="projectStatusValue" class="big-value">${state.project.projectStatus}</div>
             <div class="row"><span class="label">Workspace</span><span class="value">${statusBadge(state.project.workspaceOpened, "OK", "erreur")}</span></div>
             <div class="row"><span class="label">Projet CMake</span><span class="value">${statusBadge(state.project.cmakeProjectReady, "OK", "introuvable")}</span></div>
             <div class="row"><span class="label">Core (optionnel)</span><span class="value">${statusBadge(state.project.coreFolderFound, "présent", "absent")}</span></div>
@@ -484,13 +757,13 @@ export function getDashboardHtml(state: DashboardState): string {
         </section>
 
         <section class="grid-2">
-          <div class="diagnostic ${diagnosticStyle}">
+          <div id="diagnosticCard" class="diagnostic ${diagnosticStyle}">
             <div class="card-title">Diagnostic</div>
-            <div class="diag-code">${state.diagnostic.code}</div>
-            <div class="diag-title">${state.diagnostic.title}</div>
-            <div class="diag-message">${state.diagnostic.message}</div>
-            <div class="row"><span class="label">Cause</span><span class="value">${state.diagnostic.cause}</span></div>
-            <div class="row"><span class="label">Chemin vérifié</span><span class="value mono">${state.diagnostic.checkedPath}</span></div>
+            <div id="diagnosticCode" class="diag-code">${state.diagnostic.code}</div>
+            <div id="diagnosticTitle" class="diag-title">${state.diagnostic.title}</div>
+            <div id="diagnosticMessage" class="diag-message">${state.diagnostic.message}</div>
+            <div class="row"><span class="label">Cause</span><span id="diagnosticCause" class="value">${state.diagnostic.cause}</span></div>
+            <div class="row"><span class="label">Chemin vérifié</span><span id="diagnosticPath" class="value mono">${state.diagnostic.checkedPath}</span></div>
           </div>
 
           <div class="card">
@@ -506,6 +779,7 @@ export function getDashboardHtml(state: DashboardState): string {
       </div>
     </section>
 
+    <!-- ONGLET TERMINAL : copie visuelle des sorties envoyées par extension.ts. -->
     <section id="terminalPanel" class="panel">
       <div class="terminal">
         <section class="terminal-frame">
@@ -549,6 +823,7 @@ export function getDashboardHtml(state: DashboardState): string {
       </div>
     </section>
 
+    <!-- ONGLET PARAMÈTRES : lecture de la configuration et des chemins détectés. -->
     <section id="settingsPanel" class="panel">
       <div class="settings">
         <section class="section-grid">
@@ -613,6 +888,7 @@ export function getDashboardHtml(state: DashboardState): string {
   </div>
 
   <script>
+    // Pont officiel VS Code. postMessage envoie une action à QC1PanelProvider.
     const vscode = acquireVsCodeApi();
 
     function showPanel(event, id) {
@@ -622,6 +898,7 @@ export function getDashboardHtml(state: DashboardState): string {
       event.target.classList.add("active");
     }
 
+    // Tous les boutons de commande passent par ce message générique.
     function sendCommand(command) {
       vscode.postMessage({ type: "command", command });
     }
@@ -658,6 +935,7 @@ export function getDashboardHtml(state: DashboardState): string {
       vscode.postMessage({ type: "copyDiagnostic" });
     }
 
+    // Ajoute les lignes reçues sans utiliser innerHTML, afin de ne pas exécuter la sortie.
     function appendLines(lines, kind) {
       const output = document.getElementById("output");
 
@@ -675,6 +953,80 @@ export function getDashboardHtml(state: DashboardState): string {
       output.scrollTop = output.scrollHeight;
     }
 
+    function setText(id, value, fallback) {
+      const element = document.getElementById(id);
+      if (element) element.textContent = value === undefined || value === null || value === "" ? (fallback || "--") : String(value);
+    }
+
+    function formatRuntime(ms) {
+      return !ms || ms <= 0 ? "--" : (ms / 1000).toFixed(1) + " s";
+    }
+
+    function phaseLabel(phase) {
+      const labels = {
+        idle: "Prêt",
+        preparing: "Préparation",
+        configuring: "Configuration",
+        cleaning: "Nettoyage",
+        building: "Compilation",
+        flashing: "Flash",
+        complete: "Terminé",
+        error: "Erreur"
+      };
+      return labels[phase] || phase || "Prêt";
+    }
+
+    /** Met à jour la progression réelle sans reconstruire la page ni perdre le terminal. */
+    function setProgress(progress) {
+      const percent = Math.max(0, Math.min(100, Number(progress.progressPercent) || 0));
+      const fill = document.getElementById("progressFill");
+      fill.style.width = percent + "%";
+      fill.parentElement.setAttribute("aria-valuenow", String(percent));
+      setText("progressPercent", percent + "%");
+      setText("progressCounter", progress.measured && progress.totalSteps > 0
+        ? progress.completedSteps + " / " + progress.totalSteps
+        : progress.phase === "building" ? "En attente de Ninja" : "Étape non mesurée");
+      setText("progressPhase", phaseLabel(progress.phase), "Prêt");
+      setText("progressTask", progress.taskName, "Prêt à compiler");
+      setText("progressRuntime", progress.runtimeSeconds, "0");
+      setText("progressStep", progress.currentStep, "La prochaine sortie Ninja apparaîtra ici.");
+      document.querySelectorAll("[data-task-command]").forEach((button) => {
+        button.disabled = Boolean(progress.active);
+      });
+      const heroDot = document.getElementById("heroDot");
+      heroDot.classList.toggle("busy", Boolean(progress.active));
+      heroDot.classList.toggle("error", progress.phase === "error");
+    }
+
+    /** Rafraîchit les cartes de résultat à la fin d'une commande. */
+    function setDashboardState(state) {
+      setProgress(state.progress);
+      setText("heroProject", state.projectName);
+      setText("heroLastCommand", state.lastCommand);
+      setText("heroStatus", state.project.projectDetected ? "Projet prêt" : "À vérifier");
+      setText("buildStatusValue", state.build.lastBuildSuccess ? "Réussi" : "Échec / non lancé");
+      setText("buildTime", state.build.lastBuildTime);
+      setText("buildRuntime", formatRuntime(state.build.buildRuntimeMs));
+      setText("buildErrors", state.build.errors, "0");
+      setText("buildWarnings", state.build.warnings, "0");
+      setText("flashStatusValue", state.flash.lastFlashSuccess ? "Réussi" : "Échec / non lancé");
+      setText("flashTime", state.flash.lastFlashTime);
+      setText("flashRuntime", formatRuntime(state.flash.flashRuntimeMs));
+      setText("flashMethod", state.flash.method);
+      setText("flashMcu", state.flash.targetMCU);
+      setText("projectStatusValue", state.project.projectStatus);
+      setText("diagnosticCode", state.diagnostic.code);
+      setText("diagnosticTitle", state.diagnostic.title);
+      setText("diagnosticMessage", state.diagnostic.message);
+      setText("diagnosticCause", state.diagnostic.cause);
+      setText("diagnosticPath", state.diagnostic.checkedPath);
+
+      const diagnosticCard = document.getElementById("diagnosticCard");
+      diagnosticCard.classList.remove("diag-success", "diag-warning", "diag-error", "diag-info", "diag-idle");
+      diagnosticCard.classList.add("diag-" + (state.diagnostic.level || "idle"));
+    }
+
+    // Met à jour seulement les champs de configuration déjà présents dans le DOM.
     function setSettings(settings) {
       document.getElementById("sPath").textContent = settings.cmakeSourcePath || "--";
       document.getElementById("sOs").textContent = settings.os || "--";
@@ -731,11 +1083,28 @@ export function getDashboardHtml(state: DashboardState): string {
       });
     }
 
+    // Sens inverse du pont : extension.ts -> Webview.
+    // Les valeurs de msg.type doivent correspondre aux postMessage() du provider.
     window.addEventListener("message", (event) => {
       const msg = event.data;
 
       if (msg.type === "output") {
         appendLines(msg.lines, msg.kind);
+      }
+
+      if (msg.type === "progress") {
+        setProgress(msg.progress);
+      }
+
+      if (msg.type === "dashboardState") {
+        setDashboardState(msg.state);
+      }
+
+      if (msg.type === "status") {
+        setText("heroStatus", msg.text);
+        const heroDot = document.getElementById("heroDot");
+        heroDot.classList.toggle("busy", msg.state === "running");
+        heroDot.classList.toggle("error", msg.state === "error");
       }
 
       if (msg.type === "clearOutput") {

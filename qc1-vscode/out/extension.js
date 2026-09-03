@@ -1,4 +1,38 @@
 "use strict";
+/**
+ * RÉSUMÉ DU FICHIER — CONTRÔLEUR PRINCIPAL DE L'EXTENSION QC1
+ *
+ * Ce fichier relie VS Code, le projet STM32, les outils système et l'interface.
+ * C'est le meilleur point d'entrée pour comprendre « où vont » les actions :
+ *
+ *   bouton Webview
+ *     -> `onDidReceiveMessage()`
+ *     -> `runCommand()` / une action spécialisée
+ *     -> détection + commande CMake/OpenOCD
+ *     -> mise à jour de `dashboardState`
+ *     -> `refreshDashboard()` ou `webview.postMessage()`
+ *     -> affichage dans dashboardHtml.ts
+ *
+ * Grandes sections du fichier :
+ * 1. découverte des outils et du projet;
+ * 2. diagnostics et construction des commandes;
+ * 3. rapport de diagnostic partageable;
+ * 4. synchronisation de l'état avec la Webview;
+ * 5. classe `QC1PanelProvider` qui reçoit les clics;
+ * 6. `activate()` qui enregistre vues et commandes VS Code.
+ *
+ * BARRE DE PROGRESSION RÉELLE
+ * - `spawn()` transmet stdout pendant que CMake/Ninja travaille;
+ * - `ProgressManager` transforme `[14/37]` en 38 %;
+ * - un message `progress` actualise la Webview sans reconstruire son HTML;
+ * - `ensureToolsInstalled()` peut télécharger CMake/Ninja/GCC, mais ce téléchargement
+ *   appartient à Embedded Build Tools et QC1 ne reçoit pas son nombre d'octets;
+ * - le dessin de la barre se trouve dans dashboard/dashboardHtml.ts;
+ * - les règles d'état se trouvent dans dashboard/dashboardState.ts.
+ *
+ * Modifier les fichiers `src/`, puis lancer `npm run compile`. Les fichiers `out/`
+ * sont générés automatiquement et ne doivent normalement pas être édités à la main.
+ */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.activate = activate;
 exports.deactivate = deactivate;
@@ -9,19 +43,25 @@ const os = require("os");
 const path = require("path");
 const dashboardState_1 = require("./dashboard/dashboardState");
 const dashboardHtml_1 = require("./dashboard/dashboardHtml");
+const progressManager_1 = require("./dashboard/progressManager");
 const qc1Parser_1 = require("./qc1/qc1Parser");
 const aiPanel_1 = require("./ai/aiPanel");
 const projectDiscovery_1 = require("./qc1/projectDiscovery");
 const hardware_1 = require("./qc1/hardware");
 const diagnosticReport_1 = require("./qc1/diagnosticReport");
+// État partagé entre le contrôleur et la Webview QC1.
 let dashboardState = dashboardState_1.defaultDashboardState;
 let dashboardPanel;
-let progressTimer;
 let outputChannel;
 let stlinkProbeStatus = "non testé";
 let embeddedCmakePath = "";
 let embeddedGccPath = "";
 let embeddedNinjaPath = "";
+/**
+ * Active la dépendance Embedded Build Tools et récupère ses exécutables.
+ * `ensureToolsInstalled()` peut afficher/télécharger les outils de son côté. Son API
+ * renvoie seulement terminé/échoué : elle n'expose pas une progression en octets à QC1.
+ */
 async function initializeEmbeddedBuildTools() {
     const extension = vscode.extensions.getExtension("mylonics.embedded-build-tools");
     if (!extension) {
@@ -40,6 +80,7 @@ async function initializeEmbeddedBuildTools() {
         outputChannel?.appendLine(`[QC1] Outils embarqués indisponibles: ${error.message}`);
     }
 }
+// === AIDES FICHIERS, WORKSPACE ET PATH ======================================
 function fileExists(filePath) {
     try {
         return fs.existsSync(filePath);
@@ -79,6 +120,7 @@ function getPathCandidates(name) {
     }
     return candidates;
 }
+/** Cherche un exécutable dans le PATH courant, avec PATHEXT sous Windows. */
 function findExecutable(name) {
     for (const candidate of getPathCandidates(name)) {
         if (fileExists(candidate)) {
@@ -102,6 +144,7 @@ function getExecutableSettingPath(config, key, fallbackName) {
     }
     return findExecutable(fallbackName) || "";
 }
+/** Détecte un port série plausible lorsque qc1.serialPort est vide. */
 function findSerialPort(configuredPort) {
     if (configuredPort)
         return configuredPort;
@@ -118,6 +161,7 @@ function findSerialPort(configuredPort) {
         return "";
     }
 }
+/** Fournit des valeurs par défaut afin que l'interface reçoive toujours une erreur complète. */
 function createQc1Error(input) {
     return {
         code: input.code || "QC1-EXT-001",
@@ -140,6 +184,7 @@ function isTimeoutError(error) {
     const err = error;
     return Boolean(err?.killed && err.signal === "SIGTERM") || Boolean(err?.message?.toLowerCase().includes("timed out"));
 }
+/** Liste blanche des commandes acceptées depuis la Webview. */
 function isAllowedQc1Command(command) {
     return [
         "build",
@@ -155,6 +200,11 @@ function isAllowedQc1Command(command) {
         "dev"
     ].includes(command);
 }
+/**
+ * Fonction centrale de détection.
+ * Elle ne lance pas de build : elle inspecte les réglages, le projet, les fichiers,
+ * les artefacts et les outils, puis retourne une photographie cohérente.
+ */
 function getQc1Status(context) {
     const config = vscode.workspace.getConfiguration("qc1");
     const workspaceRoot = getWorkspaceRoot() || "";
@@ -262,6 +312,8 @@ function getQc1Status(context) {
         stlinkProbeOk: stlinkProbeStatus === "OK"
     };
 }
+// === DIAGNOSTICS LISIBLES PAR L'UTILISATEUR ================================
+/** Transforme l'état complet en texte copiable dans les journaux. */
 function formatDiagnostic(status) {
     const projectDiagnostics = getProjectDiagnostics(status);
     const diagnosticLines = projectDiagnostics.length > 0
@@ -337,6 +389,7 @@ function formatDiagnostic(status) {
     ];
     return lines.join("\n");
 }
+/** Retourne toutes les anomalies de structure du projet, pas seulement la première. */
 function getProjectDiagnostics(status) {
     const diagnostics = [];
     if (!status.projectOk) {
@@ -402,6 +455,7 @@ function getProjectDiagnostics(status) {
     }
     return diagnostics;
 }
+/** Sélectionne l'anomalie principale affichée dans la carte Diagnostic. */
 function getProjectDiagnostic(status) {
     const diagnostics = getProjectDiagnostics(status);
     if (diagnostics.length > 0)
@@ -415,6 +469,7 @@ function getProjectDiagnostic(status) {
         checkedPath: status.projectPath
     };
 }
+/** Vérifie si les outils nécessaires à une commande précise sont disponibles. */
 function getToolDiagnostic(status, command) {
     if (!status.cmakeOk && ["build", "clean", "rebuild", "tsmake", "flash", "run", "health", "status"].includes(command)) {
         return {
@@ -458,6 +513,7 @@ function getToolDiagnostic(status, command) {
     }
     return undefined;
 }
+// Convertit les erreurs de validation et de processus vers le format UI commun.
 function createQc1ErrorFromDiagnostic(diagnostic, command, cwd) {
     return createQc1Error({
         code: diagnostic.code,
@@ -507,12 +563,12 @@ function createQc1ErrorFromProcess(error, command, cwd, stdout, stderr) {
         stderr
     });
 }
+// === CONSTRUCTION ET EXÉCUTION SÉCURISÉE DES COMMANDES =====================
+/** Protège un argument qui sera placé dans la commande shell CMake. */
 function quoteArg(arg) {
     return `"${arg.replace(/"/g, '\\"')}"`;
 }
-function cmakeDefine(name, value) {
-    return quoteArg(`-D${name}=${value}`);
-}
+/** Ajoute les dossiers des outils détectés devant le PATH sans supprimer le PATH existant. */
 function getExecutionEnv(status) {
     const toolDirectories = [
         status.cmakeOk ? path.dirname(status.cmakePath) : "",
@@ -528,6 +584,7 @@ function getExecutionEnv(status) {
         PATH: [...new Set(toolDirectories), currentPath].filter(Boolean).join(path.delimiter)
     };
 }
+/** Exécute une petite commande de lecture avec timeout; ne rejette jamais la Promise. */
 function runDiagnosticProcess(executable, args, cwd, env) {
     return new Promise((resolve) => {
         (0, child_process_1.execFile)(executable, args, {
@@ -551,6 +608,7 @@ function firstMeaningfulLine(output) {
         .map((line) => line.trim())
         .find(Boolean) || "--";
 }
+/** Interroge en parallèle les versions utilisées dans le rapport partageable. */
 async function collectDiagnosticToolReports(status) {
     const specifications = [
         { name: "CMake", detected: status.cmakeOk, source: status.cmakeSource, path: status.cmakePath, args: ["--version"] },
@@ -581,6 +639,7 @@ function isPathInside(candidate, root) {
     const relative = path.relative(root, candidate);
     return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
+/** Produit une arborescence limitée sans lire le contenu des sources. */
 function collectProjectTree(root, maxEntries = 250, maxDepth = 4) {
     if (!root || !fileExists(root))
         return "Projet introuvable.";
@@ -619,6 +678,7 @@ function collectProjectTree(root, maxEntries = 250, maxDepth = 4) {
         lines.push(`... structure limitée à ${maxEntries} entrées et ${maxDepth} niveaux`);
     return lines.join("\n");
 }
+/** Copie les problèmes de l'onglet Problems qui appartiennent au projet détecté. */
 function collectVsCodeProblems(projectRoot) {
     const severityLabels = {
         [vscode.DiagnosticSeverity.Error]: "Erreur",
@@ -646,6 +706,7 @@ function collectVsCodeProblems(projectRoot) {
         problems.push(`... ${total - problems.length} problème(s) supplémentaire(s) omis`);
     return problems;
 }
+/** Capture le commit et les changements Git du projet, sans URL de dépôt. */
 async function collectGitSnapshot(projectRoot) {
     if (!projectRoot)
         return "Projet introuvable; état Git non disponible.";
@@ -680,6 +741,8 @@ function artifactSnapshot(filePath) {
         return { path: filePath, exists: true, inspectionError: error.message };
     }
 }
+// === TERMINAUX EXTERNES ET COMMANDE CMAKE ==================================
+/** Ouvre un vrai terminal VS Code pour le port série; la sortie n'est pas dans la Webview. */
 function openSerialTerminal(context) {
     const status = getQc1Status(context);
     if (!status.serialPort) {
@@ -704,6 +767,7 @@ function openSerialTerminal(context) {
     }
     terminal.show();
 }
+/** Ouvre OpenOCD en mode serveur dans un terminal indépendant. */
 function startOpenOcdTerminal(context) {
     const status = getQc1Status(context);
     if (!status.openocdOk) {
@@ -717,77 +781,141 @@ function startOpenOcdTerminal(context) {
     terminal.sendText([quoteArg(status.openocdPath), ...(0, hardware_1.getOpenOcdServerArgs)().map(quoteArg)].join(" "));
     terminal.show();
 }
-function buildCmakeExec(status, command) {
+function cmakeDefinition(name, value) {
+    return `-D${name}=${value}`;
+}
+/** Affichage uniquement : les arguments sont passés séparément à spawn(), sans shell. */
+function formatInvocation(executable, args) {
+    return [quoteArg(executable), ...args.map(quoteArg)].join(" ");
+}
+/**
+ * Décompose Build/Clean/Flash en vrais processus successifs. Ainsi stdout reste
+ * disponible pendant l'exécution et le ProgressManager peut lire chaque `[x/y]`.
+ */
+function buildProcessInvocations(status, command) {
     const config = vscode.workspace.getConfiguration("qc1");
     const buildType = config.get("buildType", "Debug");
-    const cmake = quoteArg(status.cmakePath);
-    const configureParts = [
-        cmake,
-        "-S", quoteArg(status.cmakeSourcePath),
-        "-B", quoteArg(status.buildPath),
-        "-G", quoteArg("Ninja"),
-        cmakeDefine("CMAKE_MAKE_PROGRAM", status.ninjaPath),
-        cmakeDefine("CMAKE_BUILD_TYPE", buildType)
+    const configureArgs = [
+        "-S", status.cmakeSourcePath,
+        "-B", status.buildPath,
+        "-G", "Ninja",
+        cmakeDefinition("CMAKE_MAKE_PROGRAM", status.ninjaPath),
+        cmakeDefinition("CMAKE_BUILD_TYPE", buildType)
     ];
     if (!status.nativeCmakeOk) {
         const toolchainPath = path.join(status.cmakeSourcePath, "arm-none-eabi-toolchain.cmake");
-        configureParts.push(cmakeDefine("CMAKE_TOOLCHAIN_FILE", toolchainPath), cmakeDefine("QC1_PROJECT_ROOT", status.projectPath), cmakeDefine("QC1_STARTUP", status.startupPath), cmakeDefine("QC1_LINKER_SCRIPT", status.linkerScriptPath));
+        configureArgs.push(cmakeDefinition("CMAKE_TOOLCHAIN_FILE", toolchainPath), cmakeDefinition("QC1_PROJECT_ROOT", status.projectPath), cmakeDefinition("QC1_STARTUP", status.startupPath), cmakeDefinition("QC1_LINKER_SCRIPT", status.linkerScriptPath));
         if (status.compilerOk) {
-            configureParts.push(cmakeDefine("QC1_ARM_GCC", status.compilerPath));
+            configureArgs.push(cmakeDefinition("QC1_ARM_GCC", status.compilerPath));
         }
     }
-    const configure = configureParts.join(" ");
-    const build = `${cmake} --build ${quoteArg(status.buildPath)} --config ${quoteArg(buildType)} --parallel`;
-    const target = (name) => `${cmake} --build ${quoteArg(status.buildPath)} --config ${quoteArg(buildType)} --target ${name}`;
+    const invocations = [{
+            phase: "configuring",
+            label: "Configuration CMake",
+            executable: status.cmakePath,
+            args: configureArgs
+        }];
+    const buildArgs = ["--build", status.buildPath, "--config", buildType, "--parallel"];
+    if (["clean", "rebuild"].includes(command)) {
+        invocations.push({
+            phase: "cleaning",
+            label: "Nettoyage de la cible",
+            executable: status.cmakePath,
+            args: ["--build", status.buildPath, "--config", buildType, "--target", "clean"]
+        });
+    }
+    if (["build", "rebuild", "tsmake", "flash", "run"].includes(command)) {
+        invocations.push({
+            phase: "building",
+            label: "Compilation Ninja",
+            executable: status.cmakePath,
+            args: buildArgs,
+            tracksNinja: true
+        });
+    }
+    if (!["flash", "run"].includes(command))
+        return invocations;
     const objcopyName = os.platform() === "win32" ? "arm-none-eabi-objcopy.exe" : "arm-none-eabi-objcopy";
     const objcopyPath = status.compilerOk ? path.join(path.dirname(status.compilerPath), objcopyName) : "";
-    const flash = status.openocdOk
-        ? [quoteArg(status.openocdPath), ...(0, hardware_1.getOpenOcdProgramArgs)(status.elfPath).map(quoteArg)].join(" ")
-        : `${fileExists(objcopyPath) ? `${quoteArg(objcopyPath)} -O binary -S ${quoteArg(status.elfPath)} ${quoteArg(status.binPath)} && ` : ""}${[quoteArg(status.stFlashPath), ...(0, hardware_1.getStFlashWriteArgs)(status.binPath).map(quoteArg)].join(" ")}`;
-    switch (command) {
-        case "clean":
-            return `${configure} && ${target("clean")}`;
-        case "rebuild":
-            return `${configure} && ${target("clean")} && ${build}`;
-        case "flash":
-            return `${configure} && ${build} && ${flash}`;
-        case "run":
-            return `${configure} && ${build} && ${flash}`;
-        case "status":
-        case "health":
-        case "error":
-        case "dev":
-            return quoteArg(status.stlinkPath);
-        case "serial":
-            return "";
-        case "tsmake":
-        case "build":
-        default:
-            return `${configure} && ${build}`;
+    if (status.openocdOk) {
+        invocations.push({
+            phase: "flashing",
+            label: "Flash avec OpenOCD",
+            executable: status.openocdPath,
+            args: (0, hardware_1.getOpenOcdProgramArgs)(status.elfPath)
+        });
+        return invocations;
     }
+    if (fileExists(objcopyPath)) {
+        invocations.push({
+            phase: "flashing",
+            label: "Création du firmware binaire",
+            executable: objcopyPath,
+            args: ["-O", "binary", "-S", status.elfPath, status.binPath]
+        });
+    }
+    invocations.push({
+        phase: "flashing",
+        label: "Flash avec st-flash",
+        executable: status.stFlashPath,
+        args: (0, hardware_1.getStFlashWriteArgs)(status.binPath)
+    });
+    return invocations;
 }
+/** Lance un processus sans shell et retransmet stdout/stderr dès leur arrivée. */
+function runSpawnedProcess(invocation, cwd, env, onStdout, onStderr) {
+    const command = formatInvocation(invocation.executable, invocation.args);
+    return new Promise((resolve) => {
+        let stdout = "";
+        let stderr = "";
+        let settled = false;
+        let timedOut = false;
+        const child = (0, child_process_1.spawn)(invocation.executable, invocation.args, { cwd, env, windowsHide: true });
+        const timer = setTimeout(() => {
+            timedOut = true;
+            child.kill();
+        }, 120000);
+        const finish = (exitCode, error) => {
+            if (settled)
+                return;
+            settled = true;
+            clearTimeout(timer);
+            resolve({ exitCode, stdout, stderr, command, error, timedOut });
+        };
+        child.stdout.on("data", (data) => {
+            const chunk = data.toString();
+            stdout += chunk;
+            onStdout(chunk);
+        });
+        child.stderr.on("data", (data) => {
+            const chunk = data.toString();
+            stderr += chunk;
+            onStderr(chunk);
+        });
+        child.on("error", (error) => finish(getExitCode(error), error));
+        child.on("close", (code, signal) => {
+            const error = code === 0 && !timedOut
+                ? undefined
+                : Object.assign(new Error(timedOut ? "Commande expirée" : `Processus terminé avec ${signal || `le code ${code}`}`), {
+                    code,
+                    killed: timedOut,
+                    signal: timedOut ? "SIGTERM" : signal
+                });
+            finish(code, error);
+        });
+    });
+}
+// === SYNCHRONISATION DE LA BARRE ET DU DASHBOARD ===========================
+/** Remplace le HTML complet par un nouveau rendu du `dashboardState`. */
 function refreshDashboard() {
     if (dashboardPanel) {
         dashboardPanel.webview.html = (0, dashboardHtml_1.getDashboardHtml)(dashboardState);
     }
 }
-function startRuntimeTimer() {
-    stopRuntimeTimer();
-    progressTimer = setInterval(() => {
-        if (!dashboardState.progress.active) {
-            stopRuntimeTimer();
-            return;
-        }
-        dashboardState = (0, dashboardState_1.updateProgress)(dashboardState, dashboardState.progress.progressPercent, dashboardState.progress.currentStep);
-        refreshDashboard();
-    }, 1000);
-}
-function stopRuntimeTimer() {
-    if (progressTimer) {
-        clearInterval(progressTimer);
-        progressTimer = undefined;
-    }
-}
+/**
+ * Recopie la photographie technique `Qc1Status` vers le modèle simplifié du Dashboard.
+ * Ajouter un nouveau champ visuel exige généralement : type + état ici + HTML correspondant.
+ */
 function syncDashboardState(context) {
     const status = getQc1Status(context);
     const diagnostic = getProjectDiagnostic(status);
@@ -844,12 +972,19 @@ function syncDashboardState(context) {
         }
     };
 }
+// === CONTRÔLEUR DE LA WEBVIEW QC1 ==========================================
+/**
+ * Propriétaire de la vue `qc1.panel`.
+ * Il reçoit les messages envoyés par le JavaScript de dashboardHtml.ts et renvoie
+ * les sorties, réglages, analyses et statuts avec `webview.postMessage()`.
+ */
 class QC1PanelProvider {
     constructor(extensionUri, context) {
         this.extensionUri = extensionUri;
         this.context = context;
         this.outputLines = [];
     }
+    /** Appelé par VS Code lorsque la barre latérale QC1 doit être créée. */
     resolveWebviewView(webviewView) {
         this.view = webviewView;
         dashboardPanel = webviewView;
@@ -858,6 +993,7 @@ class QC1PanelProvider {
             localResourceRoots: [this.extensionUri]
         };
         webviewView.webview.html = (0, dashboardHtml_1.getDashboardHtml)(dashboardState);
+        // Routeur Webview -> extension. Chaque `msg.type` provient d'un postMessage du HTML.
         webviewView.webview.onDidReceiveMessage(async (msg) => {
             switch (msg.type) {
                 case "command":
@@ -934,6 +1070,7 @@ class QC1PanelProvider {
         refreshDashboard();
         this.postStatus("Ready", "idle");
     }
+    /** Regroupe les réglages exposés à l'onglet Paramètres de la Webview. */
     getConfig() {
         const config = vscode.workspace.getConfiguration("qc1");
         const status = getQc1Status(this.context);
@@ -963,6 +1100,7 @@ class QC1PanelProvider {
             offlinePortable: status.cmakeProjectReady
         };
     }
+    /** Écrit les chemins auto-détectés dans les réglages du workspace. */
     async autoDetectPaths() {
         const config = vscode.workspace.getConfiguration("qc1");
         const status = getQc1Status(this.context);
@@ -982,6 +1120,7 @@ class QC1PanelProvider {
         refreshDashboard();
         this.postStatus("Chemins détectés", "success");
     }
+    /** Enregistre seulement le tampon du Terminal QC1 dans un fichier texte. */
     async saveLog() {
         const uri = await vscode.window.showSaveDialog({
             defaultUri: vscode.Uri.file(path.join(getWorkspaceRoot() || this.context.extensionPath, "qc1-log.txt")),
@@ -995,6 +1134,11 @@ class QC1PanelProvider {
         await fs.promises.writeFile(uri.fsPath, this.outputLines.join("\n"), "utf8");
         this.postStatus("Log saved", "success");
     }
+    /**
+     * Assemble le rapport complet, l'anonymise, ouvre sa prévisualisation puis propose
+     * copie ou enregistrement. Cette progression utilise la notification native VS Code,
+     * distincte de la barre colorée du Dashboard.
+     */
     async createDiagnosticReport() {
         const issueDescription = await vscode.window.showInputBox({
             title: "Rapport de diagnostic QC1",
@@ -1160,6 +1304,10 @@ class QC1PanelProvider {
             this.postStatus("Échec du rapport", "error");
         }
     }
+    /**
+     * Route les noms de commandes internes vers status, matériel, terminal ou build.
+     * C'est ici qu'il faut enregistrer une nouvelle action envoyée par un bouton.
+     */
     runCommand(command) {
         if (command === "detect-stlink") {
             this.detectStlink();
@@ -1181,7 +1329,7 @@ class QC1PanelProvider {
             openSerialTerminal(this.context);
             return;
         }
-        this.runQC1(command);
+        void this.runQC1(command);
     }
     detectStlink() {
         this.runStatus("detect-stlink");
@@ -1192,6 +1340,7 @@ class QC1PanelProvider {
     startOpenOcd() {
         startOpenOcdTerminal(this.context);
     }
+    /** Exécute un diagnostic et un probe ST-Link sans compiler le firmware. */
     runStatus(command) {
         const status = getQc1Status(this.context);
         const config = this.getConfig();
@@ -1241,7 +1390,11 @@ class QC1PanelProvider {
             timeout: 15000
         }, (error, stdout, stderr) => finish(`${stdout || ""}\n${stderr || ""}`, error || undefined));
     }
-    runQC1(command) {
+    /**
+     * Pipeline principal Build/Clean/Flash/Run.
+     * Chaque étape est lancée séparément; le build transmet stdout au ProgressManager.
+     */
+    async runQC1(command) {
         const root = getWorkspaceRoot();
         const config = this.getConfig();
         const toolStatus = getQc1Status(this.context);
@@ -1257,6 +1410,7 @@ class QC1PanelProvider {
             });
             this.applyQc1Error(qc1Error);
             this.appendQc1Error(qc1Error, "projet");
+            this.sendDashboardState();
             this.postStatus("No workspace", "error");
             return;
         }
@@ -1274,11 +1428,8 @@ class QC1PanelProvider {
             lastCommand: command
         };
         this.sendTerminalMeta();
-        dashboardState = (0, dashboardState_1.startProgress)(dashboardState, command, "Preparation de la commande");
-        refreshDashboard();
-        startRuntimeTimer();
-        dashboardState = (0, dashboardState_1.updateProgress)(dashboardState, 15, "Validation du projet");
-        refreshDashboard();
+        const progressManager = new progressManager_1.ProgressManager((progress) => this.applyProgressUpdate(progress));
+        progressManager.start(command, "Validation du projet et des outils");
         if (!isAllowedQc1Command(command)) {
             const qc1Error = createQc1Error({
                 code: "QC1-CMD-003",
@@ -1289,19 +1440,11 @@ class QC1PanelProvider {
                 cwd: projectDir,
                 path: toolStatus.cmakeSourcePath
             });
-            dashboardState = {
-                ...dashboardState,
-                progress: {
-                    ...dashboardState.progress,
-                    active: false,
-                    currentStep: qc1Error.message
-                }
-            };
-            stopRuntimeTimer();
+            progressManager.finish(false, qc1Error.message);
             this.applyQc1Error(qc1Error);
             this.appendQc1Error(qc1Error, "commande");
             this.sendQc1ErrorAnalysis(qc1Error);
-            refreshDashboard();
+            this.sendDashboardState();
             this.postStatus(qc1Error.message, "error");
             this.appendOutput("--- terminé ---", "separator");
             return;
@@ -1312,144 +1455,151 @@ class QC1PanelProvider {
         if (blockingDiagnostic) {
             const qc1Error = createQc1ErrorFromDiagnostic(blockingDiagnostic, displayedCommand, projectDir);
             const blockingLevel = blockingDiagnostic.level === "warning" ? "warning" : "error";
-            dashboardState = {
-                ...dashboardState,
-                currentAction: blockingLevel === "error" ? "Erreur" : "Diagnostic projet",
-                progress: {
-                    ...dashboardState.progress,
-                    active: false,
-                    progressPercent: dashboardState.progress.progressPercent,
-                    currentStep: qc1Error.message
-                }
-            };
-            stopRuntimeTimer();
+            progressManager.finish(false, qc1Error.message);
             this.applyQc1Error(qc1Error, blockingLevel);
             this.appendQc1Error(qc1Error, blockingDiagnostic.code.startsWith("QC1-PRJ") ? "projet" : "outil");
             this.sendQc1ErrorAnalysis(qc1Error, blockingLevel);
-            refreshDashboard();
+            this.sendDashboardState();
             this.sendTerminalMeta();
             this.postStatus(qc1Error.message, "error");
             this.appendOutput("--- terminé ---", "separator");
             return;
         }
-        const fullCommand = buildCmakeExec(toolStatus, command);
-        setTimeout(() => {
-            dashboardState = (0, dashboardState_1.updateProgress)(dashboardState, 35, "Execution du script QC1");
-            refreshDashboard();
-        }, 500);
-        setTimeout(() => {
-            dashboardState = (0, dashboardState_1.updateProgress)(dashboardState, 70, "Traitement de la sortie");
-            refreshDashboard();
-        }, 1500);
-        (0, child_process_1.exec)(fullCommand, {
-            cwd: projectDir,
-            env: getExecutionEnv(toolStatus),
-            encoding: "utf8",
-            timeout: 120000
-        }, (error, stdout, stderr) => {
-            const stdoutText = stdout ?? "";
-            const stderrText = stderr ?? "";
-            const fullOutput = `${stdoutText}\n${stderrText}`;
-            const detectedProbeStatus = (0, hardware_1.readStlinkProbeStatus)(fullOutput);
-            if (detectedProbeStatus !== "non testé") {
-                stlinkProbeStatus = detectedProbeStatus;
+        const invocations = buildProcessInvocations(toolStatus, command);
+        const environment = getExecutionEnv(toolStatus);
+        const stdoutParts = [];
+        const stderrParts = [];
+        const executedCommands = [];
+        let failedResult;
+        try {
+            for (const invocation of invocations) {
+                progressManager.setPhase(invocation.phase, invocation.label);
+                const displayedInvocation = formatInvocation(invocation.executable, invocation.args);
+                executedCommands.push(displayedInvocation);
+                this.appendOutput(`$ ${displayedInvocation}`, "command");
+                const result = await runSpawnedProcess(invocation, projectDir, environment, (chunk) => {
+                    stdoutParts.push(chunk);
+                    if (invocation.tracksNinja)
+                        progressManager.consumeOutput(chunk);
+                    this.appendOutput(chunk, "stdout");
+                }, (chunk) => {
+                    stderrParts.push(chunk);
+                    if (invocation.tracksNinja)
+                        progressManager.consumeOutput(chunk);
+                    this.appendOutput(chunk, "stderr");
+                });
+                if (result.error || result.exitCode !== 0) {
+                    failedResult = result;
+                    break;
+                }
             }
-            const parsed = (0, qc1Parser_1.parseQc1Output)(fullOutput);
-            const runtimeMs = (dashboardState.progress.runtimeSeconds || 0) * 1000;
+        }
+        catch (error) {
+            failedResult = {
+                exitCode: getExitCode(error),
+                stdout: stdoutParts.join(""),
+                stderr: stderrParts.join(""),
+                command: executedCommands.at(-1) || displayedCommand,
+                error,
+                timedOut: isTimeoutError(error)
+            };
+        }
+        const stdoutText = stdoutParts.join("");
+        const stderrText = stderrParts.join("");
+        const fullOutput = `${stdoutText}\n${stderrText}`;
+        const parsed = (0, qc1Parser_1.parseQc1Output)(fullOutput);
+        const detectedProbeStatus = (0, hardware_1.readStlinkProbeStatus)(fullOutput);
+        if (detectedProbeStatus !== "non testé")
+            stlinkProbeStatus = detectedProbeStatus;
+        const success = !failedResult &&
+            parsed.errors === 0 &&
+            !parsed.hasBuildFailed &&
+            !parsed.hasFlashFailed;
+        const resultMessage = success ? `${command} terminé` : "Commande échouée";
+        progressManager.finish(success, resultMessage);
+        const runtimeMs = dashboardState.progress.runtimeSeconds * 1000;
+        dashboardState = {
+            ...dashboardState,
+            build: {
+                ...dashboardState.build,
+                errors: parsed.errors,
+                warnings: parsed.warnings,
+                flashUsage: parsed.flashUsage,
+                ramUsage: parsed.ramUsage,
+                elfGenerated: parsed.elfGenerated,
+                binGenerated: parsed.binGenerated
+            }
+        };
+        if (["build", "rebuild", "tsmake", "flash", "run"].includes(command)) {
             dashboardState = {
                 ...dashboardState,
                 build: {
                     ...dashboardState.build,
-                    errors: parsed.errors,
-                    warnings: parsed.warnings,
-                    flashUsage: parsed.flashUsage,
-                    ramUsage: parsed.ramUsage,
-                    elfGenerated: parsed.elfGenerated,
-                    binGenerated: parsed.binGenerated
+                    lastBuildTime: new Date().toLocaleString(),
+                    lastBuildSuccess: success || (["flash", "run"].includes(command) && !parsed.hasBuildFailed && parsed.errors === 0),
+                    buildRuntimeMs: runtimeMs
                 }
             };
-            refreshDashboard();
-            if (["build", "rebuild", "tsmake", "run"].includes(command)) {
-                dashboardState = {
-                    ...dashboardState,
-                    build: {
-                        ...dashboardState.build,
-                        lastBuildTime: new Date().toLocaleString(),
-                        lastBuildSuccess: !error && !parsed.hasBuildFailed && parsed.errors === 0,
-                        buildRuntimeMs: runtimeMs,
-                        errors: parsed.errors,
-                        warnings: parsed.warnings,
-                        flashUsage: parsed.flashUsage,
-                        ramUsage: parsed.ramUsage,
-                        elfGenerated: parsed.elfGenerated,
-                        binGenerated: parsed.binGenerated
-                    }
-                };
-            }
-            if (["flash", "run"].includes(command)) {
-                dashboardState = {
-                    ...dashboardState,
-                    flash: {
-                        ...dashboardState.flash,
-                        lastFlashTime: new Date().toLocaleString(),
-                        lastFlashSuccess: !error && !parsed.hasFlashFailed,
-                        flashRuntimeMs: runtimeMs,
-                        method: fullOutput.toLowerCase().includes("openocd") ? "OpenOCD" : "st-flash",
-                        targetMCU: fullOutput.toLowerCase().includes("stm32f103") ? "STM32F103" : "--"
-                    }
-                };
-            }
-            const success = !error &&
-                parsed.errors === 0 &&
-                !parsed.hasBuildFailed &&
-                !parsed.hasFlashFailed;
-            let commandError;
-            if (error) {
-                const qc1Error = createQc1ErrorFromProcess(error, fullCommand, projectDir, stdoutText, stderrText);
-                commandError = qc1Error;
-                dashboardState = (0, dashboardState_1.finishProgress)(dashboardState, success, "QC1-CMD-OK", qc1Error.code, ["build", "rebuild", "tsmake", "run"].includes(command) ? "BUILD_SUCCESS" : command === "flash" ? "FLASH_SUCCESS" : "COMMAND_DONE", qc1Error.title, success ? `${command} terminé` : qc1Error.message, qc1Error.cause || "La commande QC1 a retourné une erreur", projectDir);
-                refreshDashboard();
-                stopRuntimeTimer();
-                this.appendQc1Error(qc1Error, "commande");
-                this.postStatus(`Failed: ${command}`, "error");
-            }
-            else {
-                const failureCause = parsed.explanation || "La commande QC1 a retourné un résultat invalide";
-                const qc1Error = success
-                    ? undefined
-                    : createQc1Error({
-                        code: "QC1-CMD-001",
-                        title: "COMMANDE_ECHOUEE",
-                        message: "Commande échouée",
-                        cause: failureCause,
-                        command: fullCommand,
-                        cwd: projectDir,
-                        exitCode: 0,
-                        stdout: stdoutText,
-                        stderr: stderrText
-                    });
-                commandError = qc1Error;
-                dashboardState = (0, dashboardState_1.finishProgress)(dashboardState, success, "QC1-CMD-OK", qc1Error?.code || "QC1-CMD-001", ["build", "rebuild", "tsmake", "run"].includes(command) ? "BUILD_SUCCESS" : command === "flash" ? "FLASH_SUCCESS" : "COMMAND_DONE", qc1Error?.title || "COMMANDE_ECHOUEE", success ? `${command} terminé` : qc1Error?.message || "Commande échouée", success ? "Commande terminée sans erreur détectée" : failureCause, projectDir);
-                refreshDashboard();
-                stopRuntimeTimer();
-                if (success) {
-                    this.appendQc1CommandResult(fullCommand, projectDir, 0, stdoutText, stderrText);
+        }
+        if (["flash", "run"].includes(command)) {
+            dashboardState = {
+                ...dashboardState,
+                flash: {
+                    ...dashboardState.flash,
+                    lastFlashTime: new Date().toLocaleString(),
+                    lastFlashSuccess: success,
+                    flashRuntimeMs: runtimeMs,
+                    method: fullOutput.toLowerCase().includes("openocd") ? "OpenOCD" : "st-flash",
+                    targetMCU: fullOutput.toLowerCase().includes("stm32f103") ? "STM32F103" : "--"
                 }
-                else if (qc1Error) {
-                    this.appendQc1Error(qc1Error, "commande");
-                }
-                this.postStatus(success ? `Done: ${command}` : `Failed: ${command}`, success ? "success" : "error");
-            }
-            syncDashboardState(this.context);
-            if (commandError) {
-                this.applyQc1Error(commandError);
-            }
-            refreshDashboard();
-            this.sendAnalysis(parsed);
-            this.sendTerminalMeta();
-            this.appendOutput("--- terminé ---", "separator");
-        });
+            };
+        }
+        const failureCause = parsed.explanation || (failedResult?.error instanceof Error
+            ? failedResult.error.message
+            : "La commande QC1 a retourné un résultat invalide");
+        const commandError = success
+            ? undefined
+            : failedResult
+                ? createQc1ErrorFromProcess(failedResult.error || Object.assign(new Error("Commande échouée"), { code: failedResult.exitCode }), failedResult.command, projectDir, failedResult.stdout, failedResult.stderr)
+                : createQc1Error({
+                    code: "QC1-CMD-001",
+                    title: "COMMANDE_ECHOUEE",
+                    message: "Commande échouée",
+                    cause: failureCause,
+                    command: executedCommands.join("\n"),
+                    cwd: projectDir,
+                    exitCode: 0,
+                    stdout: stdoutText,
+                    stderr: stderrText
+                });
+        dashboardState = (0, dashboardState_1.finishProgress)(dashboardState, success, "QC1-CMD-OK", commandError?.code || "QC1-CMD-001", ["build", "rebuild", "tsmake", "flash", "run"].includes(command) ? "BUILD_SUCCESS" : "COMMAND_DONE", commandError?.title || "COMMANDE_ECHOUEE", resultMessage, success ? "Commande terminée sans erreur détectée" : failureCause, projectDir);
+        syncDashboardState(this.context);
+        if (commandError) {
+            this.applyQc1Error(commandError);
+            this.appendQc1Error(commandError, "commande");
+        }
+        else {
+            this.appendOutput(`[QC1] ${command} terminé avec succès`, "stdout");
+        }
+        this.sendDashboardState();
+        this.sendAnalysis(parsed);
+        this.sendTerminalMeta();
+        this.postStatus(success ? `Terminé : ${command}` : `Échec : ${command}`, success ? "success" : "error");
+        this.appendOutput("--- terminé ---", "separator");
     }
+    /** Applique et transmet une mesure du ProgressManager sans recréer la Webview. */
+    applyProgressUpdate(progress) {
+        dashboardState = {
+            ...dashboardState,
+            currentAction: progress.active ? `${progress.taskName} en cours` : progress.phase === "error" ? "Erreur" : "Terminé",
+            progress: {
+                ...dashboardState.progress,
+                ...progress
+            }
+        };
+        this.view?.webview.postMessage({ type: "progress", progress });
+    }
+    /** Copie une erreur normalisée dans la carte Diagnostic du Dashboard. */
     applyQc1Error(qc1Error, level = "error") {
         dashboardState = {
             ...dashboardState,
@@ -1464,6 +1614,7 @@ class QC1PanelProvider {
             }
         };
     }
+    /** Ajoute une erreur au terminal QC1 et propose immédiatement de créer un rapport. */
     appendQc1Error(qc1Error, kind) {
         const header = kind === "projet"
             ? "[QC1] Erreur projet"
@@ -1537,6 +1688,10 @@ class QC1PanelProvider {
             explanation: `${qc1Error.cause || qc1Error.message}${qc1Error.path ? `. Chemin vérifié: ${qc1Error.path}` : ""}`
         });
     }
+    /**
+     * Point unique d'écriture du Terminal QC1 : tampon mémoire, OutputChannel VS Code,
+     * puis message `output` vers la Webview. Modifier ici pour filtrer/formater les logs.
+     */
     appendOutput(text, kind = "stdout") {
         const config = this.getConfig();
         const timestamp = config.showTimestamps
@@ -1544,7 +1699,7 @@ class QC1PanelProvider {
             : "";
         const lines = text
             .toString()
-            .split(/\r?\n/)
+            .split(/\r\n|\n|\r/)
             .filter((line) => line.length > 0)
             .map((line) => `${timestamp}${line}`);
         this.outputLines.push(...lines);
@@ -1574,6 +1729,14 @@ class QC1PanelProvider {
             explanation: "Aucune erreur connue détectée."
         });
         this.postStatus("Output cleared", "idle");
+    }
+    // === MESSAGES EXTENSION -> JAVASCRIPT DE LA WEBVIEW ======================
+    /** Met à jour les cartes finales sans effacer le terminal ou l'onglet actif. */
+    sendDashboardState() {
+        this.view?.webview.postMessage({
+            type: "dashboardState",
+            state: dashboardState
+        });
     }
     postStatus(text, state) {
         this.view?.webview.postMessage({
@@ -1616,6 +1779,12 @@ class QC1PanelProvider {
     }
 }
 QC1PanelProvider.viewType = "qc1.panel";
+// === POINT D'ENTRÉE DE L'EXTENSION =========================================
+/**
+ * VS Code appelle `activate()` une fois lorsqu'une vue/commande QC1 est demandée.
+ * On initialise les outils, crée les deux Webviews et relie les commandes du
+ * package.json aux méthodes du provider.
+ */
 async function activate(context) {
     outputChannel = vscode.window.createOutputChannel("QC1 STM32 Tools");
     context.subscriptions.push(outputChannel);
@@ -1625,6 +1794,7 @@ async function activate(context) {
     const aiProvider = new aiPanel_1.LiixAiPanelProvider(context.extensionUri);
     context.subscriptions.push(vscode.window.registerWebviewViewProvider(QC1PanelProvider.viewType, provider));
     context.subscriptions.push(vscode.window.registerWebviewViewProvider(aiPanel_1.LiixAiPanelProvider.viewType, aiProvider));
+    // Les identifiants doivent rester identiques à `contributes.commands` dans package.json.
     context.subscriptions.push(vscode.commands.registerCommand("qc1.build", () => {
         provider.runCommand("build");
     }));
@@ -1677,5 +1847,6 @@ async function activate(context) {
         vscode.commands.executeCommand("workbench.action.openSettings", "@ext:Mistral400.QC1-STM32-Tools");
     }));
 }
+// Les ressources enregistrées dans `context.subscriptions` sont libérées par VS Code.
 function deactivate() { }
 //# sourceMappingURL=extension.js.map

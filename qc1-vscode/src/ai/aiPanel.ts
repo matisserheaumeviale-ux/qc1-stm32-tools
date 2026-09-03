@@ -1,3 +1,26 @@
+/**
+ * RÉSUMÉ DU FICHIER — INTERFACE UTILISATEUR LIIX AI
+ *
+ * Ce fichier contrôle la seconde Webview de l'extension, affichée sous l'icône Liix AI.
+ * Il contient à la fois le contrôleur TypeScript et la page HTML/CSS/JavaScript du chat.
+ *
+ * Flux principal :
+ *   clic/message dans le HTML -> `vscode.postMessage()` -> `onDidReceiveMessage()`
+ *   -> client IA ou action agent -> `this.view.webview.postMessage()` -> mise à jour DOM
+ *
+ * Repères pour modifier l'interface :
+ * - `LiixUiState` : étapes possibles d'une requête;
+ * - `resolveWebviewView()` : route les messages reçus de la page;
+ * - méthodes `post...()` : renvoient les résultats vers la page;
+ * - `getHtml()` : contient tout le visuel;
+ * - `startLoadingBubble()` : crée l'anneau de chargement;
+ * - `setAgentStatus()` : décide quand afficher/retirer ce chargement.
+ *
+ * Le chargement Liix est une animation d'attente et une suite d'états, pas une barre
+ * de téléchargement ni un pourcentage réel. Les fichiers `out/ai/*.js` sont générés
+ * par TypeScript : modifier ce fichier source puis lancer `npm run compile`.
+ */
+
 import * as vscode from "vscode";
 import {
   getLiixLocalApiType,
@@ -28,6 +51,7 @@ import {
   runAgentAction
 } from "./aiAgent";
 
+// Machine d'états utilisée par le badge, les étapes et l'animation d'attente.
 type LiixUiState =
   | "idle"
   | "queued"
@@ -39,6 +63,7 @@ type LiixUiState =
   | "error"
   | "done";
 
+// Liste exhaustive des messages autorisés du JavaScript embarqué vers TypeScript.
 type WebviewMessage =
   | { type: "sendMessage"; requestId?: string; modelId?: string; message?: string; mode?: LiixAgentMode }
   | { type: "runQuickAction"; requestId?: string; action: LiixAgentAction; mode?: LiixAgentMode }
@@ -76,6 +101,7 @@ export class LiixAiPanelProvider implements vscode.WebviewViewProvider {
 
   constructor(private readonly extensionUri: vscode.Uri) {}
 
+  /** Crée la page puis branche le routeur Webview -> extension. */
   resolveWebviewView(webviewView: vscode.WebviewView): void {
     this.view = webviewView;
 
@@ -87,6 +113,7 @@ export class LiixAiPanelProvider implements vscode.WebviewViewProvider {
     webviewView.webview.html = this.getHtml();
     this.postRuntimeState();
 
+    // Chaque case correspond à un `vscode.postMessage({ type: ... })` dans getHtml().
     webviewView.webview.onDidReceiveMessage(async (message: WebviewMessage) => {
       try {
         switch (message.type) {
@@ -139,6 +166,7 @@ export class LiixAiPanelProvider implements vscode.WebviewViewProvider {
     });
   }
 
+  /** Pipeline d'une demande : outil éventuel, contexte du fichier, appel IA, réponse UI. */
   private async handleSendMessage(message: Extract<WebviewMessage, { type: "sendMessage" }>) {
     const text = (message.message || "").trim();
     const mode = message.mode || "chat";
@@ -383,6 +411,7 @@ export class LiixAiPanelProvider implements vscode.WebviewViewProvider {
     });
   }
 
+  /** Envoie l'étape courante; `setAgentStatus()` dans la page pilote ensuite le loader. */
   private postAgentStatus(state: LiixUiState, label: string, requestId?: string) {
     this.view?.webview.postMessage({ type: "agentStatus", requestId, state, label });
   }
@@ -410,6 +439,7 @@ export class LiixAiPanelProvider implements vscode.WebviewViewProvider {
     return `${apiKey.slice(0, 3)}-****-****-${apiKey.slice(-4)}`;
   }
 
+  /** Construit toute la page Liix : styles, sections, contrôles et JavaScript client. */
   private getHtml(): string {
     const modelOptions = liixAiModels.map((model) => (
       `<option value="${escapeHtml(model.id)}">${escapeHtml(model.label)}</option>`
@@ -789,6 +819,7 @@ export class LiixAiPanelProvider implements vscode.WebviewViewProvider {
       line-height: 1.45;
     }
 
+    /* === CHARGEMENT LIIX : bulle + anneau animé, sans pourcentage réel === */
     .msg.loading-message {
       display: flex;
       align-items: center;
@@ -1294,6 +1325,7 @@ export class LiixAiPanelProvider implements vscode.WebviewViewProvider {
   </div>
 
   <script>
+    // Pont vers LiixAiPanelProvider. Les variables suivantes vivent seulement dans la page.
     const vscode = acquireVsCodeApi();
     let mode = "chat";
     let promptQueue = [];
@@ -1310,6 +1342,7 @@ export class LiixAiPanelProvider implements vscode.WebviewViewProvider {
       model: "${escapeJs(defaultModel)}",
       models: []
     };
+    // Un timer par requête fait alterner les sous-titres du loader.
     let loadingTimers = new Map();
 
     const stateLabels = {
@@ -1388,6 +1421,7 @@ export class LiixAiPanelProvider implements vscode.WebviewViewProvider {
       });
     });
 
+    // Ajoute une demande à la file; une seule requête est active à la fois.
     function queuePrompt() {
       const text = $("prompt").value.trim();
       if (!text) return;
@@ -1397,6 +1431,7 @@ export class LiixAiPanelProvider implements vscode.WebviewViewProvider {
       dispatchQueue();
     }
 
+    // Prend le prochain élément et l'envoie au provider TypeScript.
     function dispatchQueue() {
       if (busy || promptQueue.length === 0) return;
       const item = promptQueue.shift();
@@ -1495,6 +1530,10 @@ export class LiixAiPanelProvider implements vscode.WebviewViewProvider {
       startLoadingBubble(requestId, state, label);
     }
 
+    /**
+     * Crée l'animation d'attente Liix dans le chat.
+     * Elle visualise un état (analyse, outil, réponse), mais ne mesure aucun téléchargement.
+     */
     function startLoadingBubble(requestId, state, label) {
       stopLoadingBubble(requestId);
       const div = document.createElement("div");
@@ -1517,6 +1556,7 @@ export class LiixAiPanelProvider implements vscode.WebviewViewProvider {
       removeLoading(requestId);
     }
 
+    // Retire le DOM et surtout son setInterval pour éviter une fuite de timers.
     function removeLoading(requestId) {
       const key = requestId || "global";
       if (loadingTimers.has(key)) {
@@ -1526,6 +1566,7 @@ export class LiixAiPanelProvider implements vscode.WebviewViewProvider {
       document.querySelectorAll('[data-loading-for="' + cssEscape(key) + '"]').forEach((node) => node.remove());
     }
 
+    // Alterne les textes « réfléchit / analyse / écrit » toutes les 850 ms.
     function startWaitingRotation(requestId, container) {
       let index = 0;
       const subtitle = container.querySelector(".loading-subtitle");
@@ -1631,6 +1672,7 @@ export class LiixAiPanelProvider implements vscode.WebviewViewProvider {
       document.querySelector('[data-page="agent"]').click();
     }
 
+    /** Point central qui montre le loader pour les états occupés et le retire à la fin. */
     function setAgentStatus(state, label, requestId) {
       const normalized = state || "idle";
       $("agentDot").className = "status-dot " + normalized + (isBusyState(normalized) ? " active" : "");
@@ -1794,6 +1836,7 @@ export class LiixAiPanelProvider implements vscode.WebviewViewProvider {
       return String(Date.now()) + "-" + Math.random().toString(16).slice(2);
     }
 
+    // Routeur extension -> page. Les types correspondent aux méthodes post...() plus haut.
     window.addEventListener("message", (event) => {
       const msg = event.data;
       if (msg.requestId && cancelledRequests.has(msg.requestId) && msg.type !== "agentStatus") return;

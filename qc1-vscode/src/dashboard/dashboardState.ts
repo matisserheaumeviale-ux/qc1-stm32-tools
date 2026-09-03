@@ -1,3 +1,23 @@
+/**
+ * RÉSUMÉ DU FICHIER — ÉTAT DU TABLEAU DE BORD QC1
+ *
+ * Ce fichier décrit toutes les données affichées par l'interface QC1 : diagnostic,
+ * progression, build, flash, projet et outils. Il ne crée aucun élément visuel.
+ * `extension.ts` modifie cet état, puis `dashboardHtml.ts` le transforme en HTML.
+ *
+ * Flux principal :
+ *   commande VS Code -> extension.ts -> DashboardState -> dashboardHtml.ts -> Webview
+ *
+ * Barre de progression : `ProgressManager` lit maintenant les compteurs `[x/y]`
+ * de Ninja. Cet état conserve x, y, le pourcentage réel, la phase et la durée.
+ *
+ * À modifier ici : forme de l'état, valeurs initiales et règles de progression.
+ * À modifier dans dashboardHtml.ts : apparence visuelle de ces données.
+ */
+
+import type { Qc1ProgressPhase } from "./progressManager";
+
+// Valeurs de couleur/gravité utilisées pour choisir le style d'un diagnostic.
 export type QC1StatusLevel =
   | "success"
   | "info"
@@ -14,15 +34,21 @@ export interface QC1Diagnostic {
   checkedPath: string;
 }
 
+// État logique de la barre : activité, pourcentage, durée et étape courante.
 export interface QC1TaskProgress {
   active: boolean;
   taskName: string;
+  phase: Qc1ProgressPhase;
   runtimeSeconds: number;
   progressPercent: number;
+  completedSteps: number;
+  totalSteps: number;
+  measured: boolean;
   currentStep: string;
   startedAt?: number;
 }
 
+// Résumé du dernier build montré dans la carte « Build ».
 export interface QC1BuildStatus {
   lastBuildTime: string;
   lastBuildSuccess: boolean;
@@ -39,6 +65,7 @@ export interface QC1BuildStatus {
   binGenerated: boolean;
 }
 
+// Résumé du dernier flash montré dans la carte « Flash ».
 export interface QC1FlashStatus {
   lastFlashTime: string;
   lastFlashSuccess: boolean;
@@ -49,6 +76,7 @@ export interface QC1FlashStatus {
   targetMCU: string;
 }
 
+// Résultat de la détection des dossiers et artefacts du projet STM32.
 export interface QC1ProjectStatus {
   workspaceOpened: boolean;
 
@@ -74,6 +102,7 @@ export interface QC1ProjectStatus {
   linkerScriptPath: string;
 }
 
+// Outils trouvés sur la machine ou fournis par une extension dépendante.
 export interface QC1EnvironmentStatus {
   os: string;
   osRaw: NodeJS.Platform;
@@ -92,6 +121,7 @@ export interface QC1EnvironmentStatus {
   cmakeDetected: boolean;
 }
 
+// Objet central transmis au générateur HTML à chaque rafraîchissement complet.
 export interface DashboardState {
   currentAction: string;
   projectName: string;
@@ -110,6 +140,7 @@ export interface DashboardState {
   environment: QC1EnvironmentStatus;
 }
 
+/** Convertit le nom technique de Node.js en libellé lisible dans l'interface. */
 export function getOsLabel(platform: NodeJS.Platform): string {
   switch (platform) {
     case "darwin":
@@ -123,6 +154,7 @@ export function getOsLabel(platform: NodeJS.Platform): string {
   }
 }
 
+// Premier état affiché avant la détection du projet ou le lancement d'une commande.
 export const defaultDashboardState: DashboardState = {
   currentAction: "Idle",
   projectName: "--",
@@ -140,8 +172,12 @@ export const defaultDashboardState: DashboardState = {
   progress: {
     active: false,
     taskName: "",
+    phase: "idle",
     runtimeSeconds: 0,
     progressPercent: 0,
+    completedSteps: 0,
+    totalSteps: 0,
+    measured: false,
     currentStep: ""
   },
 
@@ -214,53 +250,11 @@ export const defaultDashboardState: DashboardState = {
     cmakeDetected: false
   }
 };
-export function startProgress(
-  state: DashboardState,
-  taskName: string,
-  currentStep: string
-): DashboardState {
-  return {
-    ...state,
-    currentAction: `${taskName} en cours`,
-    progress: {
-      active: true,
-      taskName,
-      runtimeSeconds: 0,
-      progressPercent: 5,
-      currentStep,
-      startedAt: Date.now()
-    },
-    diagnostic: {
-      code: "QC1-CMD-START",
-      level: "info",
-      title: `${taskName.toUpperCase()}_STARTED`,
-      message: `${taskName} démarré`,
-      cause: "Commande QC1 en cours",
-      checkedPath: "--"
-    }
-  };
-}
 
-export function updateProgress(
-  state: DashboardState,
-  progressPercent: number,
-  currentStep: string
-): DashboardState {
-  const startedAt = state.progress.startedAt ?? Date.now();
-  const runtimeSeconds = Math.floor((Date.now() - startedAt) / 1000);
-
-  return {
-    ...state,
-    progress: {
-      ...state.progress,
-      active: true,
-      runtimeSeconds,
-      progressPercent: Math.max(0, Math.min(100, progressPercent)),
-      currentStep
-    }
-  };
-}
-
+/**
+ * Ferme la progression et remplace aussi le diagnostic principal.
+ * En cas d'erreur, la barre reste au dernier jalon atteint pour montrer où ça a bloqué.
+ */
 export function finishProgress(
   state: DashboardState,
   success: boolean,
@@ -272,8 +266,9 @@ export function finishProgress(
   cause = success ? "Commande terminée" : "Commande échouée",
   checkedPath = "--"
 ): DashboardState {
-  const startedAt = state.progress.startedAt ?? Date.now();
-  const runtimeSeconds = Math.floor((Date.now() - startedAt) / 1000);
+  const runtimeSeconds = state.progress.startedAt
+    ? Math.floor((Date.now() - state.progress.startedAt) / 1000)
+    : state.progress.runtimeSeconds;
 
   return {
     ...state,

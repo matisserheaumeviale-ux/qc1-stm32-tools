@@ -104,6 +104,8 @@ build/qc1/firmware.map
 
 Avec un CMake natif, QC1 conserve le nom de cible du projet, par exemple `Prog3-Lab-0.elf`, `.bin`, `.hex` et `.map`.
 
+Pendant la compilation, QC1 lit directement les compteurs Ninja comme `[14/37]`. Le Dashboard affiche donc les tâches terminées, le total, le pourcentage réel, l'étape courante et le temps écoulé. La configuration CMake et le flash affichent leur phase sans fabriquer de faux pourcentage lorsqu'aucun compteur mesurable n'est disponible.
+
 ### 4. Brancher le ST-Link
 
 Pour une connexion SWD standard STM32F103 :

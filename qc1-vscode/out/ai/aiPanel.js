@@ -1,4 +1,26 @@
 "use strict";
+/**
+ * RÉSUMÉ DU FICHIER — INTERFACE UTILISATEUR LIIX AI
+ *
+ * Ce fichier contrôle la seconde Webview de l'extension, affichée sous l'icône Liix AI.
+ * Il contient à la fois le contrôleur TypeScript et la page HTML/CSS/JavaScript du chat.
+ *
+ * Flux principal :
+ *   clic/message dans le HTML -> `vscode.postMessage()` -> `onDidReceiveMessage()`
+ *   -> client IA ou action agent -> `this.view.webview.postMessage()` -> mise à jour DOM
+ *
+ * Repères pour modifier l'interface :
+ * - `LiixUiState` : étapes possibles d'une requête;
+ * - `resolveWebviewView()` : route les messages reçus de la page;
+ * - méthodes `post...()` : renvoient les résultats vers la page;
+ * - `getHtml()` : contient tout le visuel;
+ * - `startLoadingBubble()` : crée l'anneau de chargement;
+ * - `setAgentStatus()` : décide quand afficher/retirer ce chargement.
+ *
+ * Le chargement Liix est une animation d'attente et une suite d'états, pas une barre
+ * de téléchargement ni un pourcentage réel. Les fichiers `out/ai/*.js` sont générés
+ * par TypeScript : modifier ce fichier source puis lancer `npm run compile`.
+ */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.LiixAiPanelProvider = void 0;
 const vscode = require("vscode");
@@ -14,6 +36,7 @@ class LiixAiPanelProvider {
         this.sessionAllowed = new Set();
         this.alwaysAllowed = new Set();
     }
+    /** Crée la page puis branche le routeur Webview -> extension. */
     resolveWebviewView(webviewView) {
         this.view = webviewView;
         webviewView.webview.options = {
@@ -22,6 +45,7 @@ class LiixAiPanelProvider {
         };
         webviewView.webview.html = this.getHtml();
         this.postRuntimeState();
+        // Chaque case correspond à un `vscode.postMessage({ type: ... })` dans getHtml().
         webviewView.webview.onDidReceiveMessage(async (message) => {
             try {
                 switch (message.type) {
@@ -74,6 +98,7 @@ class LiixAiPanelProvider {
             }
         });
     }
+    /** Pipeline d'une demande : outil éventuel, contexte du fichier, appel IA, réponse UI. */
     async handleSendMessage(message) {
         const text = (message.message || "").trim();
         const mode = message.mode || "chat";
@@ -277,6 +302,7 @@ class LiixAiPanelProvider {
             }
         });
     }
+    /** Envoie l'étape courante; `setAgentStatus()` dans la page pilote ensuite le loader. */
     postAgentStatus(state, label, requestId) {
         this.view?.webview.postMessage({ type: "agentStatus", requestId, state, label });
     }
@@ -298,6 +324,7 @@ class LiixAiPanelProvider {
         }
         return `${apiKey.slice(0, 3)}-****-****-${apiKey.slice(-4)}`;
     }
+    /** Construit toute la page Liix : styles, sections, contrôles et JavaScript client. */
     getHtml() {
         const modelOptions = aiModels_1.liixAiModels.map((model) => (`<option value="${escapeHtml(model.id)}">${escapeHtml(model.label)}</option>`)).join("");
         const defaultProvider = (0, aiClient_1.getLiixProvider)();
@@ -674,6 +701,7 @@ class LiixAiPanelProvider {
       line-height: 1.45;
     }
 
+    /* === CHARGEMENT LIIX : bulle + anneau animé, sans pourcentage réel === */
     .msg.loading-message {
       display: flex;
       align-items: center;
@@ -1179,6 +1207,7 @@ class LiixAiPanelProvider {
   </div>
 
   <script>
+    // Pont vers LiixAiPanelProvider. Les variables suivantes vivent seulement dans la page.
     const vscode = acquireVsCodeApi();
     let mode = "chat";
     let promptQueue = [];
@@ -1195,6 +1224,7 @@ class LiixAiPanelProvider {
       model: "${escapeJs(defaultModel)}",
       models: []
     };
+    // Un timer par requête fait alterner les sous-titres du loader.
     let loadingTimers = new Map();
 
     const stateLabels = {
@@ -1273,6 +1303,7 @@ class LiixAiPanelProvider {
       });
     });
 
+    // Ajoute une demande à la file; une seule requête est active à la fois.
     function queuePrompt() {
       const text = $("prompt").value.trim();
       if (!text) return;
@@ -1282,6 +1313,7 @@ class LiixAiPanelProvider {
       dispatchQueue();
     }
 
+    // Prend le prochain élément et l'envoie au provider TypeScript.
     function dispatchQueue() {
       if (busy || promptQueue.length === 0) return;
       const item = promptQueue.shift();
@@ -1380,6 +1412,10 @@ class LiixAiPanelProvider {
       startLoadingBubble(requestId, state, label);
     }
 
+    /**
+     * Crée l'animation d'attente Liix dans le chat.
+     * Elle visualise un état (analyse, outil, réponse), mais ne mesure aucun téléchargement.
+     */
     function startLoadingBubble(requestId, state, label) {
       stopLoadingBubble(requestId);
       const div = document.createElement("div");
@@ -1402,6 +1438,7 @@ class LiixAiPanelProvider {
       removeLoading(requestId);
     }
 
+    // Retire le DOM et surtout son setInterval pour éviter une fuite de timers.
     function removeLoading(requestId) {
       const key = requestId || "global";
       if (loadingTimers.has(key)) {
@@ -1411,6 +1448,7 @@ class LiixAiPanelProvider {
       document.querySelectorAll('[data-loading-for="' + cssEscape(key) + '"]').forEach((node) => node.remove());
     }
 
+    // Alterne les textes « réfléchit / analyse / écrit » toutes les 850 ms.
     function startWaitingRotation(requestId, container) {
       let index = 0;
       const subtitle = container.querySelector(".loading-subtitle");
@@ -1516,6 +1554,7 @@ class LiixAiPanelProvider {
       document.querySelector('[data-page="agent"]').click();
     }
 
+    /** Point central qui montre le loader pour les états occupés et le retire à la fin. */
     function setAgentStatus(state, label, requestId) {
       const normalized = state || "idle";
       $("agentDot").className = "status-dot " + normalized + (isBusyState(normalized) ? " active" : "");
@@ -1679,6 +1718,7 @@ class LiixAiPanelProvider {
       return String(Date.now()) + "-" + Math.random().toString(16).slice(2);
     }
 
+    // Routeur extension -> page. Les types correspondent aux méthodes post...() plus haut.
     window.addEventListener("message", (event) => {
       const msg = event.data;
       if (msg.requestId && cancelledRequests.has(msg.requestId) && msg.type !== "agentStatus") return;

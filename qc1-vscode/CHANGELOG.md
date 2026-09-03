@@ -6,6 +6,7 @@
 
 - Add a privacy-aware Markdown diagnostic report containing QC1, project, toolchain, hardware, build, VS Code problem, Git and recent log context.
 - Preview reports before saving or copying them, with automatic secret and personal-path redaction.
+- Add real-time Ninja progress parsing from streamed `[completed/total]` build output.
 
 ### Fixed
 
@@ -19,6 +20,11 @@
 - Report all project diagnostics without blocking `status` at the first issue.
 - Avoid logging an external CMake command when validation stopped before execution.
 - Reset the target after the `st-flash` fallback writes the firmware.
+
+### Changed
+
+- Redesign the QC1 dashboard around clearer primary actions, live progress, build, flash, project and diagnostic cards.
+- Run configure, clean, build and flash as separate spawned processes so output reaches the Webview while commands are running.
 
 ## 0.3.0
 

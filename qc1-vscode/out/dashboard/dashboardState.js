@@ -1,10 +1,25 @@
 "use strict";
+/**
+ * RÉSUMÉ DU FICHIER — ÉTAT DU TABLEAU DE BORD QC1
+ *
+ * Ce fichier décrit toutes les données affichées par l'interface QC1 : diagnostic,
+ * progression, build, flash, projet et outils. Il ne crée aucun élément visuel.
+ * `extension.ts` modifie cet état, puis `dashboardHtml.ts` le transforme en HTML.
+ *
+ * Flux principal :
+ *   commande VS Code -> extension.ts -> DashboardState -> dashboardHtml.ts -> Webview
+ *
+ * Barre de progression : `ProgressManager` lit maintenant les compteurs `[x/y]`
+ * de Ninja. Cet état conserve x, y, le pourcentage réel, la phase et la durée.
+ *
+ * À modifier ici : forme de l'état, valeurs initiales et règles de progression.
+ * À modifier dans dashboardHtml.ts : apparence visuelle de ces données.
+ */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.defaultDashboardState = void 0;
 exports.getOsLabel = getOsLabel;
-exports.startProgress = startProgress;
-exports.updateProgress = updateProgress;
 exports.finishProgress = finishProgress;
+/** Convertit le nom technique de Node.js en libellé lisible dans l'interface. */
 function getOsLabel(platform) {
     switch (platform) {
         case "darwin":
@@ -17,6 +32,7 @@ function getOsLabel(platform) {
             return platform;
     }
 }
+// Premier état affiché avant la détection du projet ou le lancement d'une commande.
 exports.defaultDashboardState = {
     currentAction: "Idle",
     projectName: "--",
@@ -32,8 +48,12 @@ exports.defaultDashboardState = {
     progress: {
         active: false,
         taskName: "",
+        phase: "idle",
         runtimeSeconds: 0,
         progressPercent: 0,
+        completedSteps: 0,
+        totalSteps: 0,
+        measured: false,
         currentStep: ""
     },
     build: {
@@ -89,45 +109,14 @@ exports.defaultDashboardState = {
         cmakeDetected: false
     }
 };
-function startProgress(state, taskName, currentStep) {
-    return {
-        ...state,
-        currentAction: `${taskName} en cours`,
-        progress: {
-            active: true,
-            taskName,
-            runtimeSeconds: 0,
-            progressPercent: 5,
-            currentStep,
-            startedAt: Date.now()
-        },
-        diagnostic: {
-            code: "QC1-CMD-START",
-            level: "info",
-            title: `${taskName.toUpperCase()}_STARTED`,
-            message: `${taskName} démarré`,
-            cause: "Commande QC1 en cours",
-            checkedPath: "--"
-        }
-    };
-}
-function updateProgress(state, progressPercent, currentStep) {
-    const startedAt = state.progress.startedAt ?? Date.now();
-    const runtimeSeconds = Math.floor((Date.now() - startedAt) / 1000);
-    return {
-        ...state,
-        progress: {
-            ...state.progress,
-            active: true,
-            runtimeSeconds,
-            progressPercent: Math.max(0, Math.min(100, progressPercent)),
-            currentStep
-        }
-    };
-}
+/**
+ * Ferme la progression et remplace aussi le diagnostic principal.
+ * En cas d'erreur, la barre reste au dernier jalon atteint pour montrer où ça a bloqué.
+ */
 function finishProgress(state, success, successCode, errorCode, successTitle, errorTitle, message, cause = success ? "Commande terminée" : "Commande échouée", checkedPath = "--") {
-    const startedAt = state.progress.startedAt ?? Date.now();
-    const runtimeSeconds = Math.floor((Date.now() - startedAt) / 1000);
+    const runtimeSeconds = state.progress.startedAt
+        ? Math.floor((Date.now() - state.progress.startedAt) / 1000)
+        : state.progress.runtimeSeconds;
     return {
         ...state,
         currentAction: success ? "Terminé" : "Erreur",
